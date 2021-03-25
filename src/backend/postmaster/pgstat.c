@@ -2236,6 +2236,30 @@ pgstat_count_heap_delete(Relation rel)
 }
 
 /*
+ * pgstat_count_toast_insert - count a tuple insertion in a toast relation
+ */
+void
+pgstat_count_toast_insert(Relation rel, PgStat_Counter n)
+{
+	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
+
+	/* XXX: It is a bit too harsh of a check here, but it help during dev */
+	Assert(rel->relkind == RELKIND_TOASTVALUE);
+
+	if (pgstat_info != NULL)
+	{
+		/* We have to log the effect at the proper transactional level */
+		int			nest_level = GetCurrentTransactionNestLevel();
+
+		if (pgstat_info->trans == NULL ||
+			pgstat_info->trans->nest_level != nest_level)
+			add_tabstat_xact_level(pgstat_info, nest_level);
+
+		pgstat_info->trans->tuples_updated++;
+	}
+}
+
+/*
  * pgstat_truncate_save_counters
  *
  * Whenever a table is truncated, we save its i/u/d counters so that they can

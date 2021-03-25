@@ -1582,6 +1582,8 @@ extern void pgstat_count_heap_delete(Relation rel);
 extern void pgstat_count_truncate(Relation rel);
 extern void pgstat_update_heap_dead_tuples(Relation rel, int delta);
 
+extern void pgstat_count_toast_insert(Relation rel, PgStat_Counter n);
+
 struct FunctionCallInfoBaseData;
 extern void pgstat_init_function_usage(struct FunctionCallInfoBaseData *fcinfo,
 									   PgStat_FunctionCallUsage *fcu);

@@ -23,6 +23,7 @@
 #include "catalog/catalog.h"
 #include "common/pg_lzcompress.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -158,6 +159,21 @@ toast_save_datum(Relation rel, Datum value,
 									RowExclusiveLock,
 									&toastidxs,
 									&num_indexes);
+
+
+	/*
+	 * heap_insert does call pgstat_count_heap_insert() but for our little
+	 * excercise we want to differenciate and count specifically.
+	 * Now the question becomes, do we need a different member in the
+	 * relcache to attach this stat? If we use the same statcounter as we do
+	 * on the newly introduced pgstat_count_toast_insert(), then we will
+	 * actually count the insertion twice, once in heap_insert via
+	 * pgstat_count_heap_insert and once here.
+	 *
+	 * Also the location of this call is off as it might be more data in the
+	 * tuple to be inserted, so this will have to be adjusted also.
+	 */
+	pgstat_count_toast_insert(toastrel, 1);
 
 	/*
 	 * Get the data pointer and length, and compute va_rawsize and va_extinfo.
