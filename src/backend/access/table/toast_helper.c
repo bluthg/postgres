@@ -230,6 +230,7 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 	Datum		new_value;
 	ToastAttrInfo *attr = &ttc->ttc_attr[attribute];
 
+	elog(WARNING, "Trying to compress attribute %i of relation %u, size is %u", attribute, ttc->ttc_rel->rd_rel->oid, attr->tai_size);
 	new_value = toast_compress_datum(*value, attr->tai_compression);
 
 	if (DatumGetPointer(new_value) != NULL)
@@ -241,11 +242,13 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 		attr->tai_colflags |= TOASTCOL_NEEDS_FREE;
 		attr->tai_size = VARSIZE(DatumGetPointer(*value));
 		ttc->ttc_flags |= (TOAST_NEEDS_CHANGE | TOAST_NEEDS_FREE);
+		elog(WARNING, "Compression suceeded, new size is %i", attr->tai_size);
 	}
 	else
 	{
 		/* incompressible, ignore on subsequent compression passes */
 		attr->tai_colflags |= TOASTCOL_INCOMPRESSIBLE;
+		elog(WARNING, "Compression failed");
 	}
 }
 
