@@ -105,6 +105,7 @@
 #define PGSTAT_DB_HASH_SIZE		16
 #define PGSTAT_TAB_HASH_SIZE	512
 #define PGSTAT_FUNCTION_HASH_SIZE	512
+#define PGSTAT_TOAST_HASH_SIZE	512
 
 
 /* ----------
@@ -126,6 +127,7 @@
 bool		pgstat_track_activities = false;
 bool		pgstat_track_counts = false;
 int			pgstat_track_functions = TRACK_FUNC_OFF;
+bool		pgstat_track_toast = true;
 int			pgstat_track_activity_query_size = 1024;
 
 /* ----------

@@ -82,6 +82,7 @@ typedef enum StatMsgType
 	PGSTAT_MTYPE_CHECKSUMFAILURE,
 	PGSTAT_MTYPE_REPLSLOT,
 	PGSTAT_MTYPE_CONNECTION,
+	PGSTAT_MTYPE_TOAST,
 } StatMsgType;
 
 /* ----------
@@ -654,6 +655,70 @@ typedef struct PgStat_MsgConn
 	SessionEndType m_disconnect;
 } PgStat_MsgConn;
 
+/* ----------
+ * PgStat_ToastCounts	The actual per-TOAST counts kept by a backend
+ *
+ * This struct should contain only actual event counters, because we memcmp
+ * it against zeroes to detect whether there are any counts to transmit.
+ *
+ * Note that the time counters are in instr_time format here.  We convert to
+ * microseconds in PgStat_Counter format when transmitting to the collector.
+ * ----------
+ */
+typedef struct PgStat_ToastCounts
+{
+	PgStat_Counter t_numexternalized;
+	PgStat_Counter t_numcompressed;
+	PgStat_Counter t_numcompressionsuccess;
+	uint64		   t_size_orig;
+	uint64		   t_size_compressed;
+	instr_time     t_comp_time;
+} PgStat_ToastCounts;
+
+/* ----------
+ * PgStat_BackendToastEntry	Entry in backend's per-toast-attr hash table
+ * ----------
+ */
+typedef struct PgStat_BackendToastEntry
+{
+	Oid			relid;
+	int			attr;
+	PgStat_ToastCounts t_counts;
+} PgStat_BackendToastEntry;
+
+/* ----------
+ * PgStat_ToastEntry			Per-function info in a MsgFuncstat
+ * ----------
+ */
+typedef struct PgStat_ToastEntry
+{
+	Oid			relid;
+	int			attr;
+	PgStat_Counter t_numexternalized;
+	PgStat_Counter t_numcompressed;
+	PgStat_Counter t_numcompressionsuccess;
+	uint64		   t_size_orig;
+	uint64		   t_size_compressed;
+	PgStat_Counter t_comp_time;	/* time in microseconds */
+} PgStat_ToastEntry;
+
+/* ----------
+ * PgStat_MsgToaststat			Sent by the backend to report function
+ *								usage statistics.
+ * ----------
+ */
+#define PGSTAT_NUM_TOASTENTRIES	\
+	((PGSTAT_MSG_PAYLOAD - sizeof(Oid) - sizeof(int))  \
+	 / sizeof(PgStat_ToastEntry))
+
+typedef struct PgStat_MsgToaststat
+{
+	PgStat_MsgHdr m_hdr;
+	Oid			m_databaseid;
+	int			m_nentries;
+	PgStat_ToastEntry m_entry[PGSTAT_NUM_TOASTENTRIES];
+} PgStat_MsgToaststat;
+
 
 /* ----------
  * PgStat_Msg					Union over all possible messages.
@@ -896,6 +961,24 @@ typedef enum BackendState
 	STATE_IDLEINTRANSACTION_ABORTED,
 	STATE_DISABLED
 } BackendState;
+
+/* ----------
+ * PgStat_StatToastEntry			The collector's data per TOAST attribute
+ * ----------
+ */
+typedef struct PgStat_StatToastEntry
+{
+	Oid			relid;
+	int			attr;
+
+	PgStat_Counter t_numexternalized;
+	PgStat_Counter t_numcompressed;
+	PgStat_Counter t_numcompressionsuccess;
+	uint64		   t_size_orig;
+	uint64		   t_size_compressed;
+	
+	PgStat_Counter t_comp_time;	/* time in microseconds */
+} PgStat_StatToastEntry;
 
 
 /* ----------
@@ -1378,6 +1461,7 @@ typedef struct PgStat_FunctionCallUsage
 extern PGDLLIMPORT bool pgstat_track_activities;
 extern PGDLLIMPORT bool pgstat_track_counts;
 extern PGDLLIMPORT int pgstat_track_functions;
+extern PGDLLIMPORT int pgstat_track_toast;
 extern PGDLLIMPORT int pgstat_track_activity_query_size;
 extern char *pgstat_stat_directory;
 extern char *pgstat_stat_tmpname;
