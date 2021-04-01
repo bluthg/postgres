@@ -360,6 +360,7 @@ static void pgstat_reset_replslot(int i, TimestampTz ts);
 
 static void pgstat_send_tabstat(PgStat_MsgTabstat *tsmsg);
 static void pgstat_send_funcstats(void);
+static void pgstat_send_toaststats(void);
 static void pgstat_send_slru(void);
 static HTAB *pgstat_collect_oids(Oid catalogid, AttrNumber anum_oid);
 static void pgstat_send_connstats(bool disconnect, TimestampTz last_report);
@@ -990,6 +991,9 @@ pgstat_report_stat(bool disconnect)
 	/* Now, send function statistics */
 	pgstat_send_funcstats();
 
+	/* Now, send TOAST statistics */
+	pgstat_send_toaststats();
+
 	/* Send WAL statistics */
 	pgstat_report_wal();
 
@@ -1094,6 +1098,64 @@ pgstat_send_funcstats(void)
 					msg.m_nentries * sizeof(PgStat_FunctionEntry));
 
 	have_function_stats = false;
+}
+
+/*
+ * Subroutine for pgstat_report_stat: populate and send a toast stat message
+ */
+static void
+pgstat_send_toaststats(void)
+{
+	/* we assume this inits to all zeroes: */
+	static const PgStat_ToastCounts all_zeroes;
+
+	PgStat_MsgToaststat msg;
+	PgStat_BackendToastEntry *entry;
+	HASH_SEQ_STATUS tstat;
+
+	if (pgStatToastActions == NULL)
+		return;
+
+	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_TOASTSTAT);
+	msg.m_databaseid = MyDatabaseId;
+	msg.m_nentries = 0;
+
+	hash_seq_init(&tstat, pgStatToastActions);
+	while ((entry = (PgStat_BackendToastEntry *) hash_seq_search(&tstat)) != NULL)
+	{
+		PgStat_ToastEntry *m_ent;
+
+		/* Skip it if no counts accumulated since last time */
+		if (memcmp(&entry->t_counts, &all_zeroes,
+				   sizeof(PgStat_ToastCounts)) == 0)
+			continue;
+
+		/* need to convert format of time accumulators */
+		m_ent = &msg.m_entry[msg.m_nentries];
+		m_ent->attr = entry->attr;
+		m_ent->t_numexternalized = entry->t_counts.t_numexternalized;
+		m_ent->t_numcompressed = entry->t_counts.t_numcompressed;
+		m_ent->t_numcompressionsuccess = entry->t_counts.t_numcompressionsuccess;
+		m_ent->t_size_orig = entry->t_counts.t_size_orig;
+		m_ent->t_size_compressed = entry->t_counts.t_size_compressed;
+		m_ent->t_comp_time = INSTR_TIME_GET_MICROSEC(entry->t_counts.t_comp_time);
+
+		if (++msg.m_nentries >= PGSTAT_NUM_TOASTENTRIES)
+		{
+			pgstat_send(&msg, offsetof(PgStat_MsgToaststat, m_entry[0]) +
+						msg.m_nentries * sizeof(PgStat_ToastEntry));
+			msg.m_nentries = 0;
+		}
+
+		/* reset the entry's counts */
+		MemSet(&entry->t_counts, 0, sizeof(PgStat_ToastCounts));
+	}
+
+	if (msg.m_nentries > 0)
+		pgstat_send(&msg, offsetof(PgStat_MsgToaststat, m_entry[0]) +
+					msg.m_nentries * sizeof(PgStat_ToastEntry));
+
+	have_toast_stats = false;
 }
 
 
@@ -2867,6 +2929,35 @@ pgstat_fetch_stat_funcentry(Oid func_id)
 	}
 
 	return funcentry;
+}
+
+/* ----------
+ * pgstat_fetch_stat_toastentry() -
+ *
+ *	Support function for the SQL-callable pgstat* functions. Returns
+ *	the collected statistics for one TOAST attribute or NULL.
+ * ----------
+ */
+PgStat_StatToastEntry *
+pgstat_fetch_stat_toastentry(Oid rel_id, int attr)
+{
+	PgStat_StatDBEntry *dbentry;
+	PgStat_BackendAttrIdentifier toast_id = { rel_id, attr };
+	PgStat_StatToastEntry *toastentry = NULL;
+
+	/* load the stats file if needed */
+	backend_read_statsfile();
+
+	/* Lookup our database, then find the requested function.  */
+	dbentry = pgstat_fetch_stat_dbentry(MyDatabaseId);
+	if (dbentry != NULL && dbentry->toastactivity != NULL)
+	{
+		toastentry = (PgStat_StatToastEntry *) hash_search(dbentry->toastactivity,
+														 (void *) &toast_id,
+														 HASH_FIND, NULL);
+	}
+
+	return toastentry;
 }
 
 

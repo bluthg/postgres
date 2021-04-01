@@ -82,7 +82,7 @@ typedef enum StatMsgType
 	PGSTAT_MTYPE_CHECKSUMFAILURE,
 	PGSTAT_MTYPE_REPLSLOT,
 	PGSTAT_MTYPE_CONNECTION,
-	PGSTAT_MTYPE_TOAST,
+	PGSTAT_MTYPE_TOASTSTAT,
 } StatMsgType;
 
 /* ----------
@@ -820,6 +820,7 @@ typedef struct PgStat_StatDBEntry
 	 */
 	HTAB	   *tables;
 	HTAB	   *functions;
+	HTAB	   *toastactivity;
 } PgStat_StatDBEntry;
 
 
@@ -1690,7 +1691,7 @@ pgstat_report_toast_activity(Oid relid, int attr,
 							int32 old_size,
 							int32 new_size,
 							int32 time_spent);
-							
+
 extern void AtEOXact_PgStat(bool isCommit, bool parallel);
 extern void AtEOSubXact_PgStat(bool isCommit, int nestDepth);
 
@@ -1717,6 +1718,7 @@ extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry(Oid relid);
 extern PgBackendStatus *pgstat_fetch_stat_beentry(int beid);
 extern LocalPgBackendStatus *pgstat_fetch_stat_local_beentry(int beid);
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);
+extern PgStat_StatToastEntry *pgstat_fetch_stat_toastentry(Oid rel_id, int attr);
 extern int	pgstat_fetch_stat_numbackends(void);
 extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
 extern PgStat_GlobalStats *pgstat_fetch_global(void);
