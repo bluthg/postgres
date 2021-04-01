@@ -279,6 +279,12 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, int options)
 		pfree(DatumGetPointer(old_value));
 	attr->tai_colflags |= TOASTCOL_NEEDS_FREE;
 	ttc->ttc_flags |= (TOAST_NEEDS_CHANGE | TOAST_NEEDS_FREE);
+	pgstat_report_toast_activity(ttc->ttc_rel->rd_rel->oid, attribute,
+							true,
+							false,
+							0,
+							0,
+							0);
 }
 
 /*

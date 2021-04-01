@@ -2004,7 +2004,6 @@ pgstat_report_toast_activity(Oid relid, int attr,
 	if (!pgStatToastActions)
 	{
 		/* First time through - initialize toast stat table */
-		elog(WARNING, "Creating pgStatToastActions hash");
 		HASHCTL		hash_ctl;
 
 		hash_ctl.keysize = sizeof(PgStat_BackendAttrIdentifier);
@@ -2020,25 +2019,31 @@ pgstat_report_toast_activity(Oid relid, int attr,
 						  HASH_ENTER, &found);
 	if (!found)
 	{
-		elog(WARNING, "No toast entry found");
+		elog(WARNING, "No toast entry found for attr %u of relation %u", attr, relid);
 		MemSet(&htabent->t_counts, 0, sizeof(PgStat_ToastCounts));
 	}
 
 	/* update counters */
 	if (externalized)
+	{
 		htabent->t_counts.t_numexternalized++;
+		elog(WARNING, "Externalized counter raised for OID %u, attr %u, now %li", relid,attr, htabent->t_counts.t_numexternalized);
+	}
 	if (compressed)
 	{
 		htabent->t_counts.t_numcompressed++;
-		elog(WARNING, "Compressed counter raised, now %li", htabent->t_counts.t_numcompressed);
-		htabent->t_counts.t_size_orig+=old_size;
-		elog(WARNING, "Old size %u added, now %li", old_size, htabent->t_counts.t_size_orig);
+		elog(WARNING, "Compressed counter raised for OID %u, attr %u, now %li", relid,attr, htabent->t_counts.t_numcompressed);
 		if (new_size)
 		{
-			htabent->t_counts.t_numcompressionsuccess++;
-			elog(WARNING, "Compressed success counter raised, now %li", htabent->t_counts.t_numcompressionsuccess);
-			htabent->t_counts.t_size_compressed+=new_size;
-			elog(WARNING, "New size %u added, now %li", new_size, htabent->t_counts.t_size_compressed);
+			htabent->t_counts.t_size_orig+=old_size;
+			elog(WARNING, "Old size %u added for OID %u, attr %u, now %li",old_size,relid,attr,  htabent->t_counts.t_size_orig);
+			if (new_size)
+			{
+				htabent->t_counts.t_numcompressionsuccess++;
+				elog(WARNING, "Compressed success counter raised for OID %u, attr %u, now %li",relid,attr, htabent->t_counts.t_numcompressionsuccess);
+				htabent->t_counts.t_size_compressed+=new_size;
+				elog(WARNING, "New size %u added for OID %u, attr %u, now %li",new_size,relid,attr, htabent->t_counts.t_size_compressed);
+			}
 		}
 		/* TODO: record times */
 	}	
