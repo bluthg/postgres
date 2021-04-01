@@ -656,6 +656,17 @@ typedef struct PgStat_MsgConn
 } PgStat_MsgConn;
 
 /* ----------
+ * PgStat_BackendAttrIdentifier	Identifier for a single attribute/column (OID + attr)
+ * Used as a hashable identifier for (e.g.) TOAST columns
+ * ----------
+ */
+typedef struct PgStat_BackendAttrIdentifier
+{
+	Oid			relid;
+	int			attr;
+} PgStat_BackendAttrIdentifier;
+
+/* ----------
  * PgStat_ToastCounts	The actual per-TOAST counts kept by a backend
  *
  * This struct should contain only actual event counters, because we memcmp
@@ -681,9 +692,8 @@ typedef struct PgStat_ToastCounts
  */
 typedef struct PgStat_BackendToastEntry
 {
-	Oid			relid;
-	int			attr;
-	PgStat_ToastCounts t_counts;
+	PgStat_BackendAttrIdentifier	attr;
+	PgStat_ToastCounts 				t_counts;
 } PgStat_BackendToastEntry;
 
 /* ----------
@@ -692,14 +702,13 @@ typedef struct PgStat_BackendToastEntry
  */
 typedef struct PgStat_ToastEntry
 {
-	Oid			relid;
-	int			attr;
-	PgStat_Counter t_numexternalized;
-	PgStat_Counter t_numcompressed;
-	PgStat_Counter t_numcompressionsuccess;
-	uint64		   t_size_orig;
-	uint64		   t_size_compressed;
-	PgStat_Counter t_comp_time;	/* time in microseconds */
+	PgStat_BackendAttrIdentifier	attr;
+	PgStat_Counter 					t_numexternalized;
+	PgStat_Counter 					t_numcompressed;
+	PgStat_Counter 					t_numcompressionsuccess;
+	uint64		   					t_size_orig;
+	uint64		   					t_size_compressed;
+	PgStat_Counter					t_comp_time;	/* time in microseconds */
 } PgStat_ToastEntry;
 
 /* ----------
