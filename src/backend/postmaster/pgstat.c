@@ -2948,7 +2948,7 @@ pgstat_fetch_stat_toastentry(Oid rel_id, int attr)
 	/* load the stats file if needed */
 	backend_read_statsfile();
 
-	/* Lookup our database, then find the requested function.  */
+	/* Lookup our database, then find the requested TOAST activity stats.  */
 	dbentry = pgstat_fetch_stat_dbentry(MyDatabaseId);
 	if (dbentry != NULL && dbentry->toastactivity != NULL)
 	{
