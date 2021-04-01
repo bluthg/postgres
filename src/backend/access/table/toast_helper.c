@@ -19,6 +19,7 @@
 #include "access/toast_helper.h"
 #include "access/toast_internals.h"
 #include "catalog/pg_type_d.h"
+#include "pgstat.h"
 
 
 /*
@@ -240,6 +241,12 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 			pfree(DatumGetPointer(*value));
 		*value = new_value;
 		attr->tai_colflags |= TOASTCOL_NEEDS_FREE;
+		pgstat_report_toast_activity(ttc->ttc_rel->rd_rel->oid, attribute,
+							false,
+							true,
+							attr->tai_size,
+							VARSIZE(DatumGetPointer(*value)),
+							0);
 		attr->tai_size = VARSIZE(DatumGetPointer(*value));
 		ttc->ttc_flags |= (TOAST_NEEDS_CHANGE | TOAST_NEEDS_FREE);
 		elog(WARNING, "Compression suceeded, new size is %i", attr->tai_size);
@@ -248,6 +255,12 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 	{
 		/* incompressible, ignore on subsequent compression passes */
 		attr->tai_colflags |= TOASTCOL_INCOMPRESSIBLE;
+		pgstat_report_toast_activity(ttc->ttc_rel->rd_rel->oid, attribute,
+							false,
+							true,
+							0,
+							0,
+							0);
 		elog(WARNING, "Compression failed");
 	}
 }

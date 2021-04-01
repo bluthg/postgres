@@ -697,7 +697,7 @@ typedef struct PgStat_BackendToastEntry
 } PgStat_BackendToastEntry;
 
 /* ----------
- * PgStat_ToastEntry			Per-function info in a MsgFuncstat
+ * PgStat_ToastEntry			Per-TOAST-column info in a MsgFuncstat
  * ----------
  */
 typedef struct PgStat_ToastEntry
@@ -1683,6 +1683,14 @@ extern void pgstat_init_function_usage(struct FunctionCallInfoBaseData *fcinfo,
 extern void pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu,
 									  bool finalize);
 
+extern void
+pgstat_report_toast_activity(Oid relid, int attr,
+							bool externalized,
+							bool compressed,
+							int32 old_size,
+							int32 new_size,
+							int32 time_spent);
+							
 extern void AtEOXact_PgStat(bool isCommit, bool parallel);
 extern void AtEOSubXact_PgStat(bool isCommit, int nestDepth);
 

@@ -234,11 +234,25 @@ static HTAB *pgStatTabHash = NULL;
  */
 static HTAB *pgStatFunctions = NULL;
 
+
 /*
  * Indicates if backend has some function stats that it hasn't yet
  * sent to the collector.
  */
 static bool have_function_stats = false;
+
+/*
+ * Backends store per-toast-column info that's waiting to be sent to the collector
+ * in this hash table (indexed by column's PgStat_BackendAttrIdentifier).
+ */
+static HTAB *pgStatToastActions = NULL;
+
+
+/*
+ * Indicates if backend has some toast stats that it hasn't yet
+ * sent to the collector.
+ */
+static bool have_toast_stats = false;
 
 /*
  * Tuple insertion/deletion counts for an open transaction can't be propagated
@@ -884,7 +898,7 @@ pgstat_report_stat(bool disconnect)
 	/* Don't expend a clock check if nothing to do */
 	if ((pgStatTabList == NULL || pgStatTabList->tsa_used == 0) &&
 		pgStatXactCommit == 0 && pgStatXactRollback == 0 &&
-		!have_function_stats && !disconnect)
+		!have_function_stats && !have_toast_stats && !disconnect)
 		return;
 
 	/*
@@ -1966,6 +1980,71 @@ pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
 
 	/* indicate that we have something to send */
 	have_function_stats = true;
+}
+
+/*
+ * Report TOAST activity
+ * Called by toast_helper functions.
+ */
+void
+pgstat_report_toast_activity(Oid relid, int attr,
+							bool externalized,
+							bool compressed,
+							int32 old_size,
+							int32 new_size,
+							int32 time_spent)
+{
+	PgStat_BackendAttrIdentifier toastattr = { relid, attr };
+	PgStat_BackendToastEntry *htabent;
+	bool		found;
+
+	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_toast)
+		return;
+
+	if (!pgStatToastActions)
+	{
+		/* First time through - initialize toast stat table */
+		elog(WARNING, "Creating pgStatToastActions hash");
+		HASHCTL		hash_ctl;
+
+		hash_ctl.keysize = sizeof(PgStat_BackendAttrIdentifier);
+		hash_ctl.entrysize = sizeof(PgStat_BackendToastEntry);
+		pgStatToastActions = hash_create("TOAST stat entries",
+									  PGSTAT_TOAST_HASH_SIZE,
+									  &hash_ctl,
+									  HASH_ELEM | HASH_BLOBS);
+	}
+
+	/* Get the stats entry for this TOAST attribute, create if necessary */
+	htabent = hash_search(pgStatToastActions, &toastattr,
+						  HASH_ENTER, &found);
+	if (!found)
+	{
+		elog(WARNING, "No toast entry found");
+		MemSet(&htabent->t_counts, 0, sizeof(PgStat_ToastCounts));
+	}
+
+	/* update counters */
+	if (externalized)
+		htabent->t_counts.t_numexternalized++;
+	if (compressed)
+	{
+		htabent->t_counts.t_numcompressed++;
+		elog(WARNING, "Compressed counter raised, now %li", htabent->t_counts.t_numcompressed);
+		htabent->t_counts.t_size_orig+=old_size;
+		elog(WARNING, "Old size %u added, now %li", old_size, htabent->t_counts.t_size_orig);
+		if (new_size)
+		{
+			htabent->t_counts.t_numcompressionsuccess++;
+			elog(WARNING, "Compressed success counter raised, now %li", htabent->t_counts.t_numcompressionsuccess);
+			htabent->t_counts.t_size_compressed+=new_size;
+			elog(WARNING, "New size %u added, now %li", new_size, htabent->t_counts.t_size_compressed);
+		}
+		/* TODO: record times */
+	}	
+	
+	/* indicate that we have something to send */
+	have_toast_stats = true;
 }
 
 
