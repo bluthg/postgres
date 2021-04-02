@@ -755,6 +755,7 @@ typedef union PgStat_Msg
 	PgStat_MsgSLRU msg_slru;
 	PgStat_MsgFuncstat msg_funcstat;
 	PgStat_MsgFuncpurge msg_funcpurge;
+	PgStat_MsgToaststat msg_toaststat;
 	PgStat_MsgRecoveryConflict msg_recoveryconflict;
 	PgStat_MsgDeadlock msg_deadlock;
 	PgStat_MsgTempFile msg_tempfile;
@@ -978,9 +979,7 @@ typedef enum BackendState
  */
 typedef struct PgStat_StatToastEntry
 {
-	Oid			relid;
-	int			attr;
-
+	PgStat_BackendAttrIdentifier t_id;
 	PgStat_Counter t_numexternalized;
 	PgStat_Counter t_numcompressed;
 	PgStat_Counter t_numcompressionsuccess;

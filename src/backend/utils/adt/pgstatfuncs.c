@@ -416,7 +416,7 @@ Datum
 pg_stat_get_toast_externalizations(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
-	int			attr = PG_GETARG_INT16 (1);
+	int			attr = PG_GETARG_INT16(1);
 	PgStat_StatToastEntry *toastentry;
 
 	if ((toastentry = pgstat_fetch_stat_toastentry(relid,attr)) == NULL)
@@ -428,7 +428,7 @@ Datum
 pg_stat_get_toast_compressions(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
-	int			attr = PG_GETARG_INT16 (1);
+	int			attr = PG_GETARG_INT16(1);
 	PgStat_StatToastEntry *toastentry;
 
 	if ((toastentry = pgstat_fetch_stat_toastentry(relid,attr)) == NULL)
@@ -440,7 +440,7 @@ Datum
 pg_stat_get_toast_compressionsuccesses(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
-	int			attr = PG_GETARG_INT16 (1);
+	int			attr = PG_GETARG_INT16(1);
 	PgStat_StatToastEntry *toastentry;
 
 	if ((toastentry = pgstat_fetch_stat_toastentry(relid,attr)) == NULL)
@@ -452,7 +452,7 @@ Datum
 pg_stat_get_toast_originalsizesum(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
-	int			attr = PG_GETARG_INT16 (1);
+	int			attr = PG_GETARG_INT16(1);
 	PgStat_StatToastEntry *toastentry;
 
 	if ((toastentry = pgstat_fetch_stat_toastentry(relid,attr)) == NULL)
@@ -464,7 +464,7 @@ Datum
 pg_stat_get_toast_compressedsizesum(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
-	int			attr = PG_GETARG_INT16 (1);
+	int			attr = PG_GETARG_INT16(1);
 	PgStat_StatToastEntry *toastentry;
 
 	if ((toastentry = pgstat_fetch_stat_toastentry(relid,attr)) == NULL)
