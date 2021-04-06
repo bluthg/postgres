@@ -790,6 +790,7 @@ _equalJoinExpr(const JoinExpr *a, const JoinExpr *b)
 	COMPARE_NODE_FIELD(larg);
 	COMPARE_NODE_FIELD(rarg);
 	COMPARE_NODE_FIELD(usingClause);
+	COMPARE_NODE_FIELD(join_using_alias);
 	COMPARE_NODE_FIELD(quals);
 	COMPARE_NODE_FIELD(alias);
 	COMPARE_SCALAR_FIELD(rtindex);
@@ -2596,6 +2597,16 @@ _equalIndexElem(const IndexElem *a, const IndexElem *b)
 	return true;
 }
 
+
+static bool
+_equalStatsElem(const StatsElem *a, const StatsElem *b)
+{
+	COMPARE_STRING_FIELD(name);
+	COMPARE_NODE_FIELD(expr);
+
+	return true;
+}
+
 static bool
 _equalColumnDef(const ColumnDef *a, const ColumnDef *b)
 {
@@ -2693,6 +2704,7 @@ _equalRangeTblEntry(const RangeTblEntry *a, const RangeTblEntry *b)
 	COMPARE_NODE_FIELD(joinaliasvars);
 	COMPARE_NODE_FIELD(joinleftcols);
 	COMPARE_NODE_FIELD(joinrightcols);
+	COMPARE_NODE_FIELD(join_using_alias);
 	COMPARE_NODE_FIELD(functions);
 	COMPARE_SCALAR_FIELD(funcordinality);
 	COMPARE_NODE_FIELD(tablefunc);
@@ -2975,6 +2987,7 @@ _equalPartitionCmd(const PartitionCmd *a, const PartitionCmd *b)
 {
 	COMPARE_NODE_FIELD(name);
 	COMPARE_NODE_FIELD(bound);
+	COMPARE_SCALAR_FIELD(concurrent);
 
 	return true;
 }
@@ -3722,6 +3735,9 @@ equal(const void *a, const void *b)
 			break;
 		case T_IndexElem:
 			retval = _equalIndexElem(a, b);
+			break;
+		case T_StatsElem:
+			retval = _equalStatsElem(a, b);
 			break;
 		case T_ColumnDef:
 			retval = _equalColumnDef(a, b);
