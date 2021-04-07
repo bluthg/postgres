@@ -140,6 +140,8 @@ typedef struct Query
 	bool		hasForUpdate;	/* FOR [KEY] UPDATE/SHARE was specified */
 	bool		hasRowSecurity; /* rewriter has applied some RLS policy */
 
+	bool		isReturn;		/* is a RETURN statement */
+
 	List	   *cteList;		/* WITH list (of CommonTableExpr's) */
 
 	List	   *rtable;			/* list of range table entries */
@@ -1721,6 +1723,16 @@ typedef struct SetOperationStmt
 } SetOperationStmt;
 
 
+/*
+ * RETURN statement (inside SQL function body)
+ */
+typedef struct ReturnStmt
+{
+	NodeTag		type;
+	Node	   *returnval;
+} ReturnStmt;
+
+
 /* ----------------------
  *		PL/pgSQL Assignment Statement
  *
@@ -2774,7 +2786,8 @@ typedef struct SecLabelStmt
 #define CURSOR_OPT_SCROLL		0x0002	/* SCROLL explicitly given */
 #define CURSOR_OPT_NO_SCROLL	0x0004	/* NO SCROLL explicitly given */
 #define CURSOR_OPT_INSENSITIVE	0x0008	/* INSENSITIVE */
-#define CURSOR_OPT_HOLD			0x0010	/* WITH HOLD */
+#define CURSOR_OPT_ASENSITIVE	0x0010	/* ASENSITIVE */
+#define CURSOR_OPT_HOLD			0x0020	/* WITH HOLD */
 /* these planner-control flags do not correspond to any SQL grammar: */
 #define CURSOR_OPT_FAST_PLAN	0x0100	/* prefer fast-start plan */
 #define CURSOR_OPT_GENERIC_PLAN 0x0200	/* force use of generic plan */
@@ -2923,6 +2936,7 @@ typedef struct CreateFunctionStmt
 	List	   *parameters;		/* a list of FunctionParameter */
 	TypeName   *returnType;		/* the return type */
 	List	   *options;		/* a list of DefElem */
+	Node	   *sql_body;
 } CreateFunctionStmt;
 
 typedef enum FunctionParameterMode
