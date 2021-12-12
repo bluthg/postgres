@@ -6429,7 +6429,7 @@ pgstat_recv_toaststat(PgStat_MsgToaststat *msg, int len)
 			 * If it's a new entry, initialize counters to the values
 			 * we just got.
 			 */
-			elog(DEBUG2, "First time I see this!");
+			elog(DEBUG2, "First time I see this toastentry");
 			toastentry->t_numexternalized = toastmsg->t_numexternalized;
 			toastentry->t_numcompressed = toastmsg->t_numcompressed;
 			toastentry->t_numcompressionsuccess = toastmsg->t_numcompressionsuccess;
@@ -6441,7 +6441,7 @@ pgstat_recv_toaststat(PgStat_MsgToaststat *msg, int len)
 			/*
 			 * Otherwise add the values to the existing entry.
 			 */
-			elog(DEBUG2, "Found this, updating!");
+			elog(DEBUG2, "Found this toastentry, updating");
 			toastentry->t_numexternalized += toastmsg->t_numexternalized;
 			toastentry->t_numcompressed += toastmsg->t_numcompressed;
 			toastentry->t_numcompressionsuccess += toastmsg->t_numcompressionsuccess;
