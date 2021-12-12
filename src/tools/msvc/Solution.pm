@@ -1,3 +1,6 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 package Solution;
 
 #
@@ -173,7 +176,7 @@ sub GenerateFiles
 
 			if ($package_version !~ /^(\d+)(?:\.(\d+))?/)
 			{
-				confess "Bad format of version: $self->{strver}\n";
+				confess "Bad format of version: $package_version\n";
 			}
 			$majorver = sprintf("%d", $1);
 			$minorver = sprintf("%d", $2 ? $2 : 0);
@@ -181,7 +184,7 @@ sub GenerateFiles
 		elsif (/\bAC_DEFINE\(OPENSSL_API_COMPAT, \[([0-9xL]+)\]/)
 		{
 			$ac_define_openssl_api_compat_found = 1;
-			$openssl_api_compat = $1;
+			$openssl_api_compat                 = $1;
 		}
 	}
 	close($c);
@@ -202,10 +205,6 @@ sub GenerateFiles
 	# Every symbol in pg_config.h.in must be accounted for here.  Set
 	# to undef if the symbol should not be defined.
 	my %define = (
-		ACCEPT_TYPE_ARG1           => 'unsigned int',
-		ACCEPT_TYPE_ARG2           => 'struct sockaddr *',
-		ACCEPT_TYPE_ARG3           => 'int',
-		ACCEPT_TYPE_RETURN         => 'unsigned int PASCAL',
 		ALIGNOF_DOUBLE             => 8,
 		ALIGNOF_INT                => 4,
 		ALIGNOF_LONG               => 4,
@@ -236,16 +235,19 @@ sub GenerateFiles
 		HAVE_CRYPTO_LOCK           => undef,
 		HAVE_DECL_FDATASYNC        => 0,
 		HAVE_DECL_F_FULLFSYNC      => 0,
-		HAVE_DECL_LLVMCREATEGDBREGISTRATIONLISTENER => undef,
-		HAVE_DECL_LLVMCREATEPERFJITEVENTLISTENER    => undef,
+		HAVE_DECL_LLVMCREATEGDBREGISTRATIONLISTENER => 0,
+		HAVE_DECL_LLVMCREATEPERFJITEVENTLISTENER    => 0,
 		HAVE_DECL_LLVMGETHOSTCPUNAME                => 0,
 		HAVE_DECL_LLVMGETHOSTCPUFEATURES            => 0,
 		HAVE_DECL_LLVMORCGETSYMBOLADDRESSIN         => 0,
-		HAVE_DECL_POSIX_FADVISE                     => undef,
+		HAVE_DECL_POSIX_FADVISE                     => 0,
+		HAVE_DECL_PREADV                            => 0,
+		HAVE_DECL_PWRITEV                           => 0,
 		HAVE_DECL_RTLD_GLOBAL                       => 0,
 		HAVE_DECL_RTLD_NOW                          => 0,
-		HAVE_DECL_STRLCAT                           => undef,
-		HAVE_DECL_STRLCPY                           => undef,
+		HAVE_DECL_SIGWAIT                           => 0,
+		HAVE_DECL_STRLCAT                           => 0,
+		HAVE_DECL_STRLCPY                           => 0,
 		HAVE_DECL_STRNLEN                           => 1,
 		HAVE_DECL_STRTOLL                           => 1,
 		HAVE_DECL_STRTOULL                          => 1,
@@ -299,7 +301,6 @@ sub GenerateFiles
 		HAVE_LDAP_INITIALIZE                        => undef,
 		HAVE_LIBCRYPTO                              => undef,
 		HAVE_LIBLDAP                                => undef,
-		HAVE_LIBLDAP_R                              => undef,
 		HAVE_LIBLZ4                                 => undef,
 		HAVE_LIBM                                   => undef,
 		HAVE_LIBPAM                                 => undef,
@@ -328,12 +329,12 @@ sub GenerateFiles
 		HAVE_PAM_PAM_APPL_H         => undef,
 		HAVE_POLL                   => undef,
 		HAVE_POLL_H                 => undef,
+		HAVE_POSIX_DECL_SIGWAIT     => undef,
 		HAVE_POSIX_FADVISE          => undef,
 		HAVE_POSIX_FALLOCATE        => undef,
 		HAVE_PPC_LWARX_MUTEX_HINT   => undef,
 		HAVE_PPOLL                  => undef,
 		HAVE_PREAD                  => undef,
-		HAVE_PREADV                 => undef,
 		HAVE_PSTAT                  => undef,
 		HAVE_PS_STRINGS             => undef,
 		HAVE_PTHREAD                => undef,
@@ -341,8 +342,6 @@ sub GenerateFiles
 		HAVE_PTHREAD_IS_THREADED_NP => undef,
 		HAVE_PTHREAD_PRIO_INHERIT   => undef,
 		HAVE_PWRITE                 => undef,
-		HAVE_PWRITEV                => undef,
-		HAVE_RANDOM                 => undef,
 		HAVE_READLINE_H             => undef,
 		HAVE_READLINE_HISTORY_H     => undef,
 		HAVE_READLINE_READLINE_H    => undef,
@@ -355,14 +354,15 @@ sub GenerateFiles
 		HAVE_RL_FILENAME_QUOTE_CHARACTERS        => undef,
 		HAVE_RL_FILENAME_QUOTING_FUNCTION        => undef,
 		HAVE_RL_RESET_SCREEN_SIZE                => undef,
+		HAVE_RL_VARIABLE_BIND                    => undef,
 		HAVE_SECURITY_PAM_APPL_H                 => undef,
 		HAVE_SETENV                              => undef,
 		HAVE_SETPROCTITLE                        => undef,
 		HAVE_SETPROCTITLE_FAST                   => undef,
 		HAVE_SETSID                              => undef,
 		HAVE_SHM_OPEN                            => undef,
+		HAVE_SOCKLEN_T                           => 1,
 		HAVE_SPINLOCKS                           => 1,
-		HAVE_SRANDOM                             => undef,
 		HAVE_STDBOOL_H                           => 1,
 		HAVE_STDINT_H                            => 1,
 		HAVE_STDLIB_H                            => 1,
@@ -532,6 +532,12 @@ sub GenerateFiles
 		$define{HAVE_LIBXSLT} = 1;
 		$define{USE_LIBXSLT}  = 1;
 	}
+	if ($self->{options}->{lz4})
+	{
+		$define{HAVE_LIBLZ4} = 1;
+		$define{HAVE_LZ4_H}  = 1;
+		$define{USE_LZ4}     = 1;
+	}
 	if ($self->{options}->{openssl})
 	{
 		$define{USE_OPENSSL} = 1;
@@ -539,7 +545,8 @@ sub GenerateFiles
 		my ($digit1, $digit2, $digit3) = $self->GetOpenSSLVersion();
 
 		# More symbols are needed with OpenSSL 1.1.0 and above.
-		if ($digit1 >= '1' && $digit2 >= '1' && $digit3 >= '0')
+		if (   ($digit1 >= '3' && $digit2 >= '0' && $digit3 >= '0')
+			|| ($digit1 >= '1' && $digit2 >= '1' && $digit3 >= '0'))
 		{
 			$define{HAVE_ASN1_STRING_GET0_DATA} = 1;
 			$define{HAVE_BIO_GET_DATA}          = 1;
@@ -947,7 +954,8 @@ sub AddProject
 		# changed their library names from:
 		# - libeay to libcrypto
 		# - ssleay to libssl
-		if ($digit1 >= '1' && $digit2 >= '1' && $digit3 >= '0')
+		if (   ($digit1 >= '3' && $digit2 >= '0' && $digit3 >= '0')
+			|| ($digit1 >= '1' && $digit2 >= '1' && $digit3 >= '0'))
 		{
 			my $dbgsuffix;
 			my $libsslpath;
@@ -1014,10 +1022,26 @@ sub AddProject
 	}
 	if ($self->{options}->{gss})
 	{
-		$proj->AddIncludeDir($self->{options}->{gss} . '\inc\krb5');
-		$proj->AddLibrary($self->{options}->{gss} . '\lib\i386\krb5_32.lib');
-		$proj->AddLibrary($self->{options}->{gss} . '\lib\i386\comerr32.lib');
-		$proj->AddLibrary($self->{options}->{gss} . '\lib\i386\gssapi32.lib');
+		$proj->AddIncludeDir($self->{options}->{gss} . '\include');
+		$proj->AddIncludeDir($self->{options}->{gss} . '\include\krb5');
+		if ($self->{platform} eq 'Win32')
+		{
+			$proj->AddLibrary(
+				$self->{options}->{gss} . '\lib\i386\krb5_32.lib');
+			$proj->AddLibrary(
+				$self->{options}->{gss} . '\lib\i386\comerr32.lib');
+			$proj->AddLibrary(
+				$self->{options}->{gss} . '\lib\i386\gssapi32.lib');
+		}
+		else
+		{
+			$proj->AddLibrary(
+				$self->{options}->{gss} . '\lib\amd64\krb5_64.lib');
+			$proj->AddLibrary(
+				$self->{options}->{gss} . '\lib\amd64\comerr64.lib');
+			$proj->AddLibrary(
+				$self->{options}->{gss} . '\lib\amd64\gssapi64.lib');
+		}
 	}
 	if ($self->{options}->{iconv})
 	{
@@ -1050,6 +1074,11 @@ sub AddProject
 	{
 		$proj->AddIncludeDir($self->{options}->{xslt} . '\include');
 		$proj->AddLibrary($self->{options}->{xslt} . '\lib\libxslt.lib');
+	}
+	if ($self->{options}->{lz4})
+	{
+		$proj->AddIncludeDir($self->{options}->{lz4} . '\include');
+		$proj->AddLibrary($self->{options}->{lz4} . '\lib\liblz4.lib');
 	}
 	if ($self->{options}->{uuid})
 	{
@@ -1162,11 +1191,14 @@ sub GetFakeConfigure
 	$cfg .= ' --with-uuid'          if ($self->{options}->{uuid});
 	$cfg .= ' --with-libxml'        if ($self->{options}->{xml});
 	$cfg .= ' --with-libxslt'       if ($self->{options}->{xslt});
+	$cfg .= ' --with-lz4'           if ($self->{options}->{lz4});
 	$cfg .= ' --with-gssapi'        if ($self->{options}->{gss});
 	$cfg .= ' --with-icu'           if ($self->{options}->{icu});
 	$cfg .= ' --with-tcl'           if ($self->{options}->{tcl});
 	$cfg .= ' --with-perl'          if ($self->{options}->{perl});
 	$cfg .= ' --with-python'        if ($self->{options}->{python});
+	my $port = $self->{options}->{'--with-pgport'};
+	$cfg .= " --with-pgport=$port" if defined($port);
 
 	return $cfg;
 }
@@ -1278,6 +1310,34 @@ sub new
 	$self->{vcver}                      = '16.00';
 	$self->{visualStudioName}           = 'Visual Studio 2019';
 	$self->{VisualStudioVersion}        = '16.0.28729.10';
+	$self->{MinimumVisualStudioVersion} = '10.0.40219.1';
+
+	return $self;
+}
+
+package VS2022Solution;
+
+#
+# Package that encapsulates a Visual Studio 2022 solution file
+#
+
+use Carp;
+use strict;
+use warnings;
+use base qw(Solution);
+
+no warnings qw(redefine);    ## no critic
+
+sub new
+{
+	my $classname = shift;
+	my $self      = $classname->SUPER::_new(@_);
+	bless($self, $classname);
+
+	$self->{solutionFileVersion}        = '12.00';
+	$self->{vcver}                      = '17.00';
+	$self->{visualStudioName}           = 'Visual Studio 2022';
+	$self->{VisualStudioVersion}        = '17.0.31903.59';
 	$self->{MinimumVisualStudioVersion} = '10.0.40219.1';
 
 	return $self;

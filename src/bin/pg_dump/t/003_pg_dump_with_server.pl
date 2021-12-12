@@ -1,14 +1,16 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 3;
 
-my $tempdir       = TestLib::tempdir;
-my $tempdir_short = TestLib::tempdir_short;
+my $tempdir       = PostgreSQL::Test::Utils::tempdir;
 
-my $node = get_new_node('main');
+my $node = PostgreSQL::Test::Cluster->new('main');
 my $port = $node->port;
 
 $node->init;

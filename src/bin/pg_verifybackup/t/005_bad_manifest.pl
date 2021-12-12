@@ -1,3 +1,6 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # Test the behavior of pg_verifybackup when the backup manifest has
 # problems.
 
@@ -5,15 +8,15 @@ use strict;
 use warnings;
 use Cwd;
 use Config;
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 58;
 
-my $tempdir = TestLib::tempdir;
+my $tempdir = PostgreSQL::Test::Utils::tempdir;
 
 test_bad_manifest(
 	'input string ended unexpectedly',
-	qr/could not parse backup manifest: The input string ended unexpectedly/,
+	qr/could not parse backup manifest: parsing failed/,
 	<<EOM);
 {
 EOM
@@ -173,6 +176,8 @@ EOM
 
 sub test_parse_error
 {
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
 	my ($test_name, $manifest_contents) = @_;
 
 	test_bad_manifest($test_name,
@@ -183,6 +188,8 @@ sub test_parse_error
 
 sub test_fatal_error
 {
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
 	my ($test_name, $manifest_contents) = @_;
 
 	test_bad_manifest($test_name, qr/fatal: $test_name/, $manifest_contents);
@@ -191,6 +198,8 @@ sub test_fatal_error
 
 sub test_bad_manifest
 {
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
 	my ($test_name, $regexp, $manifest_contents) = @_;
 
 	open(my $fh, '>', "$tempdir/backup_manifest") || die "open: $!";

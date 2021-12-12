@@ -58,12 +58,7 @@ defGetString(DefElem *def)
 		case T_Integer:
 			return psprintf("%ld", (long) intVal(def->arg));
 		case T_Float:
-
-			/*
-			 * T_Float values are kept in string form, so this type cheat
-			 * works (and doesn't risk losing precision)
-			 */
-			return strVal(def->arg);
+			return castNode(Float, def->arg)->val;
 		case T_String:
 			return strVal(def->arg);
 		case T_TypeName:
@@ -206,7 +201,7 @@ defGetInt64(DefElem *def)
 			 * strings.
 			 */
 			return DatumGetInt64(DirectFunctionCall1(int8in,
-													 CStringGetDatum(strVal(def->arg))));
+													 CStringGetDatum(castNode(Float, def->arg)->val)));
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -346,4 +341,16 @@ defGetStringList(DefElem *def)
 	}
 
 	return (List *) def->arg;
+}
+
+/*
+ * Raise an error about a conflicting DefElem.
+ */
+void
+errorConflictingDefElem(DefElem *defel, ParseState *pstate)
+{
+	ereport(ERROR,
+			errcode(ERRCODE_SYNTAX_ERROR),
+			errmsg("conflicting or redundant options"),
+			parser_errposition(pstate, defel->location));
 }

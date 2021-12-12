@@ -1,3 +1,6 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # This module sets up a test server, for the SSL regression tests.
 #
 # The server is configured as follows:
@@ -27,8 +30,8 @@ package SSLServer;
 
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use File::Basename;
 use File::Copy;
 use Test::More;
@@ -59,36 +62,50 @@ sub copy_files
 # servercidr: what to put in pg_hba.conf, e.g. '127.0.0.1/32'
 sub configure_test_server_for_ssl
 {
-	my ($node, $serverhost, $servercidr, $authmethod, $password,
-		$password_enc) = @_;
-
+	my ($node, $serverhost, $servercidr, $authmethod, %params) = @_;
 	my $pgdata = $node->data_dir;
+
+	my @databases = ( 'trustdb', 'certdb', 'certdb_dn', 'certdb_dn_re', 'certdb_cn', 'verifydb' );
 
 	# Create test users and databases
 	$node->psql('postgres', "CREATE USER ssltestuser");
 	$node->psql('postgres', "CREATE USER md5testuser");
 	$node->psql('postgres', "CREATE USER anotheruser");
 	$node->psql('postgres', "CREATE USER yetanotheruser");
-	$node->psql('postgres', "CREATE DATABASE trustdb");
-	$node->psql('postgres', "CREATE DATABASE certdb");
-	$node->psql('postgres', "CREATE DATABASE certdb_dn");
-	$node->psql('postgres', "CREATE DATABASE certdb_dn_re");
-	$node->psql('postgres', "CREATE DATABASE certdb_cn");
-	$node->psql('postgres', "CREATE DATABASE verifydb");
+
+	foreach my $db (@databases)
+	{
+		$node->psql('postgres', "CREATE DATABASE $db");
+	}
 
 	# Update password of each user as needed.
-	if (defined($password))
+	if (defined($params{password}))
 	{
+		die "Password encryption must be specified when password is set"
+			unless defined($params{password_enc});
+
 		$node->psql('postgres',
-			"SET password_encryption='$password_enc'; ALTER USER ssltestuser PASSWORD '$password';"
+			"SET password_encryption='$params{password_enc}'; ALTER USER ssltestuser PASSWORD '$params{password}';"
 		);
 		# A special user that always has an md5-encrypted password
 		$node->psql('postgres',
-			"SET password_encryption='md5'; ALTER USER md5testuser PASSWORD '$password';"
+			"SET password_encryption='md5'; ALTER USER md5testuser PASSWORD '$params{password}';"
 		);
 		$node->psql('postgres',
-			"SET password_encryption='$password_enc'; ALTER USER anotheruser PASSWORD '$password';"
+			"SET password_encryption='$params{password_enc}'; ALTER USER anotheruser PASSWORD '$params{password}';"
 		);
+	}
+
+	# Create any extensions requested in the setup
+	if (defined($params{extensions}))
+	{
+		foreach my $extension (@{$params{extensions}})
+		{
+			foreach my $db (@databases)
+			{
+				$node->psql($db, "CREATE EXTENSION $extension CASCADE;");
+			}
+		}
 	}
 
 	# enable logging etc.
@@ -136,13 +153,13 @@ sub switch_server_cert
 	my $cafile   = $_[2] || "root+client_ca";
 	my $crlfile  = "root+client.crl";
 	my $crldir;
-	my $pgdata   = $node->data_dir;
+	my $pgdata = $node->data_dir;
 
 	# defaults to use crl file
 	if (defined $_[3] || defined $_[4])
 	{
 		$crlfile = $_[3];
-		$crldir = $_[4];
+		$crldir  = $_[4];
 	}
 
 	open my $sslconf, '>', "$pgdata/sslconfig.conf";
@@ -151,7 +168,7 @@ sub switch_server_cert
 	print $sslconf "ssl_cert_file='$certfile.crt'\n";
 	print $sslconf "ssl_key_file='$certfile.key'\n";
 	print $sslconf "ssl_crl_file='$crlfile'\n" if defined $crlfile;
-	print $sslconf "ssl_crl_dir='$crldir'\n" if defined $crldir;
+	print $sslconf "ssl_crl_dir='$crldir'\n"   if defined $crldir;
 	close $sslconf;
 
 	$node->restart;

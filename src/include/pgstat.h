@@ -13,12 +13,13 @@
 
 #include "datatype/timestamp.h"
 #include "portability/instr_time.h"
-#include "postmaster/pgarch.h" /* for MAX_XFN_CHARS */
+#include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
+#include "replication/logicalproto.h"
 #include "utils/backend_progress.h" /* for backward compatibility */
-#include "utils/backend_status.h" /* for backward compatibility */
+#include "utils/backend_status.h"	/* for backward compatibility */
 #include "utils/hsearch.h"
 #include "utils/relcache.h"
-#include "utils/wait_event.h" /* for backward compatibility */
+#include "utils/wait_event.h"	/* for backward compatibility */
 
 
 /* ----------
@@ -71,6 +72,7 @@ typedef enum StatMsgType
 	PGSTAT_MTYPE_ANALYZE,
 	PGSTAT_MTYPE_ARCHIVER,
 	PGSTAT_MTYPE_BGWRITER,
+	PGSTAT_MTYPE_CHECKPOINTER,
 	PGSTAT_MTYPE_WAL,
 	PGSTAT_MTYPE_SLRU,
 	PGSTAT_MTYPE_FUNCSTAT,
@@ -80,7 +82,10 @@ typedef enum StatMsgType
 	PGSTAT_MTYPE_DEADLOCK,
 	PGSTAT_MTYPE_CHECKSUMFAILURE,
 	PGSTAT_MTYPE_REPLSLOT,
-	PGSTAT_MTYPE_CONNECTION,
+	PGSTAT_MTYPE_CONNECT,
+	PGSTAT_MTYPE_DISCONNECT,
+	PGSTAT_MTYPE_SUBSCRIPTIONPURGE,
+	PGSTAT_MTYPE_SUBWORKERERROR,
 } StatMsgType;
 
 /* ----------
@@ -121,7 +126,7 @@ typedef struct PgStat_TableCounts
 	PgStat_Counter t_tuples_updated;
 	PgStat_Counter t_tuples_deleted;
 	PgStat_Counter t_tuples_hot_updated;
-	bool		t_truncated;
+	bool		t_truncdropped;
 
 	PgStat_Counter t_delta_live_tuples;
 	PgStat_Counter t_delta_dead_tuples;
@@ -143,7 +148,8 @@ typedef enum PgStat_Shared_Reset_Target
 typedef enum PgStat_Single_Reset_Type
 {
 	RESET_TABLE,
-	RESET_FUNCTION
+	RESET_FUNCTION,
+	RESET_SUBWORKER
 } PgStat_Single_Reset_Type;
 
 /* ------------------------------------------------------------
@@ -184,10 +190,12 @@ typedef struct PgStat_TableXactStatus
 	PgStat_Counter tuples_inserted; /* tuples inserted in (sub)xact */
 	PgStat_Counter tuples_updated;	/* tuples updated in (sub)xact */
 	PgStat_Counter tuples_deleted;	/* tuples deleted in (sub)xact */
-	bool		truncated;		/* relation truncated in this (sub)xact */
-	PgStat_Counter inserted_pre_trunc;	/* tuples inserted prior to truncate */
-	PgStat_Counter updated_pre_trunc;	/* tuples updated prior to truncate */
-	PgStat_Counter deleted_pre_trunc;	/* tuples deleted prior to truncate */
+	bool		truncdropped;		/* relation truncated/dropped in this
+									 * (sub)xact */
+	/* tuples i/u/d prior to truncate/drop */
+	PgStat_Counter inserted_pre_truncdrop;
+	PgStat_Counter updated_pre_truncdrop;
+	PgStat_Counter deleted_pre_truncdrop;
 	int			nest_level;		/* subtransaction nest level */
 	/* links to other structs for same relation: */
 	struct PgStat_TableXactStatus *upper;	/* next higher subxact if any */
@@ -278,7 +286,7 @@ typedef struct PgStat_TableEntry
  * ----------
  */
 #define PGSTAT_NUM_TABENTRIES  \
-	((PGSTAT_MSG_PAYLOAD - sizeof(Oid) - 3 * sizeof(int) - 2 * sizeof(PgStat_Counter))	\
+	((PGSTAT_MSG_PAYLOAD - sizeof(Oid) - 3 * sizeof(int) - 5 * sizeof(PgStat_Counter)) \
 	 / sizeof(PgStat_TableEntry))
 
 typedef struct PgStat_MsgTabstat
@@ -290,6 +298,9 @@ typedef struct PgStat_MsgTabstat
 	int			m_xact_rollback;
 	PgStat_Counter m_block_read_time;	/* times in microseconds */
 	PgStat_Counter m_block_write_time;
+	PgStat_Counter m_session_time;
+	PgStat_Counter m_active_time;
+	PgStat_Counter m_idle_in_xact_time;
 	PgStat_TableEntry m_entry[PGSTAT_NUM_TABENTRIES];
 } PgStat_MsgTabstat;
 
@@ -357,6 +368,7 @@ typedef struct PgStat_MsgResetsinglecounter
 	Oid			m_databaseid;
 	PgStat_Single_Reset_Type m_resettype;
 	Oid			m_objectid;
+	Oid			m_subobjectid;
 } PgStat_MsgResetsinglecounter;
 
 /* ----------
@@ -378,7 +390,7 @@ typedef struct PgStat_MsgResetslrucounter
 typedef struct PgStat_MsgResetreplslotcounter
 {
 	PgStat_MsgHdr m_hdr;
-	char		m_slotname[NAMEDATALEN];
+	NameData	m_slotname;
 	bool		clearall;
 } PgStat_MsgResetreplslotcounter;
 
@@ -450,17 +462,27 @@ typedef struct PgStat_MsgBgWriter
 {
 	PgStat_MsgHdr m_hdr;
 
+	PgStat_Counter m_buf_written_clean;
+	PgStat_Counter m_maxwritten_clean;
+	PgStat_Counter m_buf_alloc;
+} PgStat_MsgBgWriter;
+
+/* ----------
+ * PgStat_MsgCheckpointer  Sent by the checkpointer to update statistics.
+ * ----------
+ */
+typedef struct PgStat_MsgCheckpointer
+{
+	PgStat_MsgHdr m_hdr;
+
 	PgStat_Counter m_timed_checkpoints;
 	PgStat_Counter m_requested_checkpoints;
 	PgStat_Counter m_buf_written_checkpoints;
-	PgStat_Counter m_buf_written_clean;
-	PgStat_Counter m_maxwritten_clean;
 	PgStat_Counter m_buf_written_backend;
 	PgStat_Counter m_buf_fsync_backend;
-	PgStat_Counter m_buf_alloc;
 	PgStat_Counter m_checkpoint_write_time; /* times in milliseconds */
 	PgStat_Counter m_checkpoint_sync_time;
-} PgStat_MsgBgWriter;
+} PgStat_MsgCheckpointer;
 
 /* ----------
  * PgStat_MsgWal			Sent by backends and background processes to update WAL statistics.
@@ -506,7 +528,8 @@ typedef struct PgStat_MsgSLRU
 typedef struct PgStat_MsgReplSlot
 {
 	PgStat_MsgHdr m_hdr;
-	char		m_slotname[NAMEDATALEN];
+	NameData	m_slotname;
+	bool		m_create;
 	bool		m_drop;
 	PgStat_Counter m_spill_txns;
 	PgStat_Counter m_spill_count;
@@ -514,8 +537,58 @@ typedef struct PgStat_MsgReplSlot
 	PgStat_Counter m_stream_txns;
 	PgStat_Counter m_stream_count;
 	PgStat_Counter m_stream_bytes;
+	PgStat_Counter m_total_txns;
+	PgStat_Counter m_total_bytes;
 } PgStat_MsgReplSlot;
 
+/* ----------
+ * PgStat_MsgSubscriptionPurge	Sent by the backend and autovacuum to tell the
+ *								collector about the dead subscriptions.
+ * ----------
+ */
+#define PGSTAT_NUM_SUBSCRIPTIONPURGE  \
+	((PGSTAT_MSG_PAYLOAD - sizeof(Oid) - sizeof(int)) / sizeof(Oid))
+
+typedef struct PgStat_MsgSubscriptionPurge
+{
+	PgStat_MsgHdr m_hdr;
+	Oid			m_databaseid;
+	int			m_nentries;
+	Oid			m_subids[PGSTAT_NUM_SUBSCRIPTIONPURGE];
+} PgStat_MsgSubscriptionPurge;
+
+/* ----------
+ * PgStat_MsgSubWorkerError		Sent by the apply worker or the table sync
+ *								worker to report the error occurred while
+ *								processing changes.
+ * ----------
+ */
+#define PGSTAT_SUBWORKERERROR_MSGLEN 256
+typedef struct PgStat_MsgSubWorkerError
+{
+	PgStat_MsgHdr m_hdr;
+
+	/*
+	 * m_subid and m_subrelid are used to determine the subscription and the
+	 * reporter of the error. m_subrelid is InvalidOid if reported by an apply
+	 * worker otherwise reported by a table sync worker.
+	 */
+	Oid			m_databaseid;
+	Oid			m_subid;
+	Oid			m_subrelid;
+
+	/*
+	 * Oid of the table that the reporter was actually processing. m_relid can
+	 * be InvalidOid if an error occurred during worker applying a
+	 * non-data-modification message such as RELATION.
+	 */
+	Oid			m_relid;
+
+	LogicalRepMsgType m_command;
+	TransactionId m_xid;
+	TimestampTz m_timestamp;
+	char		m_message[PGSTAT_SUBWORKERERROR_MSGLEN];
+} PgStat_MsgSubWorkerError;
 
 /* ----------
  * PgStat_MsgRecoveryConflict	Sent by the backend upon recovery conflict
@@ -639,20 +712,26 @@ typedef struct PgStat_MsgChecksumFailure
 } PgStat_MsgChecksumFailure;
 
 /* ----------
- * PgStat_MsgConn			Sent by the backend to update connection statistics.
+ * PgStat_MsgConnect			Sent by the backend upon connection
+ *								establishment
  * ----------
  */
-typedef struct PgStat_MsgConn
+typedef struct PgStat_MsgConnect
 {
 	PgStat_MsgHdr m_hdr;
 	Oid			m_databaseid;
-	PgStat_Counter m_count;
-	PgStat_Counter m_session_time;
-	PgStat_Counter m_active_time;
-	PgStat_Counter m_idle_in_xact_time;
-	SessionEndType m_disconnect;
-} PgStat_MsgConn;
+} PgStat_MsgConnect;
 
+/* ----------
+ * PgStat_MsgDisconnect			Sent by the backend when disconnecting
+ * ----------
+ */
+typedef struct PgStat_MsgDisconnect
+{
+	PgStat_MsgHdr m_hdr;
+	Oid			m_databaseid;
+	SessionEndType m_cause;
+} PgStat_MsgDisconnect;
 
 /* ----------
  * PgStat_Msg					Union over all possible messages.
@@ -676,6 +755,7 @@ typedef union PgStat_Msg
 	PgStat_MsgAnalyze msg_analyze;
 	PgStat_MsgArchiver msg_archiver;
 	PgStat_MsgBgWriter msg_bgwriter;
+	PgStat_MsgCheckpointer msg_checkpointer;
 	PgStat_MsgWal msg_wal;
 	PgStat_MsgSLRU msg_slru;
 	PgStat_MsgFuncstat msg_funcstat;
@@ -685,7 +765,10 @@ typedef union PgStat_Msg
 	PgStat_MsgTempFile msg_tempfile;
 	PgStat_MsgChecksumFailure msg_checksumfailure;
 	PgStat_MsgReplSlot msg_replslot;
-	PgStat_MsgConn msg_conn;
+	PgStat_MsgConnect msg_connect;
+	PgStat_MsgDisconnect msg_disconnect;
+	PgStat_MsgSubscriptionPurge msg_subscriptionpurge;
+	PgStat_MsgSubWorkerError msg_subworkererror;
 } PgStat_Msg;
 
 
@@ -697,7 +780,7 @@ typedef union PgStat_Msg
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCA1
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCA5
 
 /* ----------
  * PgStat_StatDBEntry			The collector's data per database
@@ -740,11 +823,16 @@ typedef struct PgStat_StatDBEntry
 	TimestampTz stats_timestamp;	/* time of db stats file update */
 
 	/*
-	 * tables and functions must be last in the struct, because we don't write
-	 * the pointers out to the stats file.
+	 * tables, functions, and subscription workers must be last in the struct,
+	 * because we don't write the pointers out to the stats file.
+	 *
+	 * subworkers is the hash table of PgStat_StatSubWorkerEntry which stores
+	 * statistics of logical replication workers: apply worker and table sync
+	 * worker.
 	 */
 	HTAB	   *tables;
 	HTAB	   *functions;
+	HTAB	   *subworkers;
 } PgStat_StatDBEntry;
 
 
@@ -817,9 +905,20 @@ typedef struct PgStat_ArchiverStats
 } PgStat_ArchiverStats;
 
 /*
- * Global statistics kept in the stats collector
+ * Background writer statistics kept in the stats collector
  */
-typedef struct PgStat_GlobalStats
+typedef struct PgStat_BgWriterStats
+{
+	PgStat_Counter buf_written_clean;
+	PgStat_Counter maxwritten_clean;
+	PgStat_Counter buf_alloc;
+	TimestampTz stat_reset_timestamp;
+} PgStat_BgWriterStats;
+
+/*
+ * Checkpointer statistics kept in the stats collector
+ */
+typedef struct PgStat_CheckpointerStats
 {
 	TimestampTz stats_timestamp;	/* time of stats file update */
 	PgStat_Counter timed_checkpoints;
@@ -827,12 +926,19 @@ typedef struct PgStat_GlobalStats
 	PgStat_Counter checkpoint_write_time;	/* times in milliseconds */
 	PgStat_Counter checkpoint_sync_time;
 	PgStat_Counter buf_written_checkpoints;
-	PgStat_Counter buf_written_clean;
-	PgStat_Counter maxwritten_clean;
 	PgStat_Counter buf_written_backend;
 	PgStat_Counter buf_fsync_backend;
-	PgStat_Counter buf_alloc;
-	TimestampTz stat_reset_timestamp;
+} PgStat_CheckpointerStats;
+
+/*
+ * Global statistics kept in the stats collector
+ */
+typedef struct PgStat_GlobalStats
+{
+	TimestampTz stats_timestamp;	/* time of stats file update */
+
+	PgStat_CheckpointerStats checkpointer;
+	PgStat_BgWriterStats bgwriter;
 } PgStat_GlobalStats;
 
 /*
@@ -869,18 +975,52 @@ typedef struct PgStat_SLRUStats
 /*
  * Replication slot statistics kept in the stats collector
  */
-typedef struct PgStat_ReplSlotStats
+typedef struct PgStat_StatReplSlotEntry
 {
-	char		slotname[NAMEDATALEN];
+	NameData	slotname;
 	PgStat_Counter spill_txns;
 	PgStat_Counter spill_count;
 	PgStat_Counter spill_bytes;
 	PgStat_Counter stream_txns;
 	PgStat_Counter stream_count;
 	PgStat_Counter stream_bytes;
+	PgStat_Counter total_txns;
+	PgStat_Counter total_bytes;
 	TimestampTz stat_reset_timestamp;
-} PgStat_ReplSlotStats;
+} PgStat_StatReplSlotEntry;
 
+/* The lookup key for subscription worker hash table */
+typedef struct PgStat_StatSubWorkerKey
+{
+	Oid			subid;
+
+	/*
+	 * Oid of the table for which tablesync worker will copy the initial data.
+	 * An InvalidOid will be assigned for apply workers.
+	 */
+	Oid			subrelid;
+} PgStat_StatSubWorkerKey;
+
+/*
+ * Logical replication apply worker and table sync worker statistics kept in the
+ * stats collector.
+ */
+typedef struct PgStat_StatSubWorkerEntry
+{
+	PgStat_StatSubWorkerKey key;	/* hash key (must be first) */
+
+	/*
+	 * Subscription worker error statistics representing an error that
+	 * occurred during application of changes or the initial table
+	 * synchronization.
+	 */
+	Oid			last_error_relid;
+	LogicalRepMsgType last_error_command;
+	TransactionId last_error_xid;
+	PgStat_Counter last_error_count;
+	TimestampTz last_error_time;
+	char		last_error_message[PGSTAT_SUBWORKERERROR_MSGLEN];
+} PgStat_StatSubWorkerEntry;
 
 /*
  * Working state needed to accumulate per-function-call timing statistics.
@@ -912,7 +1052,13 @@ extern char *pgstat_stat_filename;
 /*
  * BgWriter statistics counters are updated directly by bgwriter and bufmgr
  */
-extern PgStat_MsgBgWriter BgWriterStats;
+extern PgStat_MsgBgWriter PendingBgWriterStats;
+
+/*
+ * Checkpointer statistics counters are updated directly by checkpointer and
+ * bufmgr.
+ */
+extern PgStat_MsgCheckpointer PendingCheckpointerStats;
 
 /*
  * WAL statistics counter is updated by backends and background processes
@@ -965,10 +1111,12 @@ extern void pgstat_drop_database(Oid databaseid);
 extern void pgstat_clear_snapshot(void);
 extern void pgstat_reset_counters(void);
 extern void pgstat_reset_shared_counters(const char *);
-extern void pgstat_reset_single_counter(Oid objectid, PgStat_Single_Reset_Type type);
+extern void pgstat_reset_single_counter(Oid objectid, Oid subobjectid,
+										PgStat_Single_Reset_Type type);
 extern void pgstat_reset_slru_counter(const char *);
 extern void pgstat_reset_replslot_counter(const char *name);
 
+extern void pgstat_report_connect(Oid dboid);
 extern void pgstat_report_autovac(Oid dboid);
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples);
@@ -980,11 +1128,13 @@ extern void pgstat_report_recovery_conflict(int reason);
 extern void pgstat_report_deadlock(void);
 extern void pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount);
 extern void pgstat_report_checksum_failure(void);
-extern void pgstat_report_replslot(const char *slotname, PgStat_Counter spilltxns,
-								   PgStat_Counter spillcount, PgStat_Counter spillbytes,
-								   PgStat_Counter streamtxns, PgStat_Counter streamcount,
-								   PgStat_Counter streambytes);
+extern void pgstat_report_replslot(const PgStat_StatReplSlotEntry *repSlotStat);
+extern void pgstat_report_replslot_create(const char *slotname);
 extern void pgstat_report_replslot_drop(const char *slotname);
+extern void pgstat_report_subworker_error(Oid subid, Oid subrelid, Oid relid,
+										  LogicalRepMsgType command,
+										  TransactionId xid, const char *errmsg);
+extern void pgstat_report_subscription_drop(Oid subid);
 
 extern void pgstat_initialize(void);
 
@@ -1065,8 +1215,8 @@ extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
 
 extern void pgstat_send_archiver(const char *xlog, bool failed);
 extern void pgstat_send_bgwriter(void);
-extern void pgstat_report_wal(void);
-extern bool pgstat_send_wal(bool force);
+extern void pgstat_send_checkpointer(void);
+extern void pgstat_send_wal(bool force);
 
 /* ----------
  * Support functions for the SQL-callable functions to
@@ -1076,11 +1226,15 @@ extern bool pgstat_send_wal(bool force);
 extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dbid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry(Oid relid);
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);
+extern PgStat_StatSubWorkerEntry *pgstat_fetch_stat_subworker_entry(Oid subid,
+																	Oid subrelid);
 extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
+extern PgStat_BgWriterStats *pgstat_fetch_stat_bgwriter(void);
+extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
 extern PgStat_GlobalStats *pgstat_fetch_global(void);
 extern PgStat_WalStats *pgstat_fetch_stat_wal(void);
 extern PgStat_SLRUStats *pgstat_fetch_slru(void);
-extern PgStat_ReplSlotStats *pgstat_fetch_replslot(int *nslots_p);
+extern PgStat_StatReplSlotEntry *pgstat_fetch_replslot(NameData slotname);
 
 extern void pgstat_count_slru_page_zeroed(int slru_idx);
 extern void pgstat_count_slru_page_hit(int slru_idx);

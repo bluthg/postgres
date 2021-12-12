@@ -50,6 +50,7 @@
 #include "catalog/pg_partitioned_table.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_publication.h"
+#include "catalog/pg_publication_namespace.h"
 #include "catalog/pg_publication_rel.h"
 #include "catalog/pg_range.h"
 #include "catalog/pg_replication_origin.h"
@@ -96,8 +97,8 @@
 
 	There must be a unique index underlying each syscache (ie, an index
 	whose key is the same as that of the cache).  If there is not one
-	already, add definitions for it to include/catalog/pg_*.h: you need
-	to add a DECLARE_UNIQUE_INDEX macro and a #define for the index OID.
+	already, add the definition for it to include/catalog/pg_*.h using
+	DECLARE_UNIQUE_INDEX.
 	(Adding an index requires a catversion.h update, while simply
 	adding/deleting caches only requires a recompile.)
 
@@ -616,6 +617,28 @@ static const struct cachedesc cacheinfo[] = {
 			0
 		},
 		8
+	},
+	{PublicationNamespaceRelationId,	/* PUBLICATIONNAMESPACE */
+		PublicationNamespaceObjectIndexId,
+		1,
+		{
+			Anum_pg_publication_namespace_oid,
+			0,
+			0,
+			0
+		},
+		64
+	},
+	{PublicationNamespaceRelationId,	/* PUBLICATIONNAMESPACEMAP */
+		PublicationNamespacePnnspidPnpubidIndexId,
+		2,
+		{
+			Anum_pg_publication_namespace_pnnspid,
+			Anum_pg_publication_namespace_pnpubid,
+			0,
+			0
+		},
+		64
 	},
 	{PublicationRelationId,		/* PUBLICATIONOID */
 		PublicationObjectIndexId,

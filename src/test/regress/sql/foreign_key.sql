@@ -463,6 +463,33 @@ SELECT * from FKTABLE;
 DROP TABLE FKTABLE;
 DROP TABLE PKTABLE;
 
+-- Test for ON DELETE SET NULL/DEFAULT (column_list);
+CREATE TABLE PKTABLE (tid int, id int, PRIMARY KEY (tid, id));
+CREATE TABLE FKTABLE (tid int, id int, foo int, FOREIGN KEY (tid, id) REFERENCES PKTABLE ON DELETE SET NULL (bar));
+CREATE TABLE FKTABLE (tid int, id int, foo int, FOREIGN KEY (tid, id) REFERENCES PKTABLE ON DELETE SET NULL (foo));
+CREATE TABLE FKTABLE (tid int, id int, foo int, FOREIGN KEY (tid, foo) REFERENCES PKTABLE ON UPDATE SET NULL (foo));
+CREATE TABLE FKTABLE (
+  tid int, id int,
+  fk_id_del_set_null int,
+  fk_id_del_set_default int DEFAULT 0,
+  FOREIGN KEY (tid, fk_id_del_set_null) REFERENCES PKTABLE ON DELETE SET NULL (fk_id_del_set_null),
+  FOREIGN KEY (tid, fk_id_del_set_default) REFERENCES PKTABLE ON DELETE SET DEFAULT (fk_id_del_set_default)
+);
+
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'fktable'::regclass::oid ORDER BY oid;
+
+INSERT INTO PKTABLE VALUES (1, 0), (1, 1), (1, 2);
+INSERT INTO FKTABLE VALUES
+  (1, 1, 1, NULL),
+  (1, 2, NULL, 2);
+
+DELETE FROM PKTABLE WHERE id = 1 OR id = 2;
+
+SELECT * FROM FKTABLE ORDER BY id;
+
+DROP TABLE FKTABLE;
+DROP TABLE PKTABLE;
+
 CREATE TABLE PKTABLE (ptest1 int PRIMARY KEY);
 CREATE TABLE FKTABLE_FAIL1 ( ftest1 int, CONSTRAINT fkfail1 FOREIGN KEY (ftest2) REFERENCES PKTABLE);
 CREATE TABLE FKTABLE_FAIL2 ( ftest1 int, CONSTRAINT fkfail1 FOREIGN KEY (ftest1) REFERENCES PKTABLE(ptest2));
@@ -1284,6 +1311,30 @@ INSERT INTO fk_notpartitioned_pk VALUES (2501, 142857);
 UPDATE fk_notpartitioned_pk SET a = 1500 WHERE a = 2502;
 SELECT * FROM fk_partitioned_fk WHERE b = 142857;
 
+-- ON DELETE SET NULL column_list
+ALTER TABLE fk_partitioned_fk DROP CONSTRAINT fk_partitioned_fk_a_b_fkey;
+ALTER TABLE fk_partitioned_fk ADD FOREIGN KEY (a, b)
+  REFERENCES fk_notpartitioned_pk
+  ON DELETE SET NULL (a);
+BEGIN;
+DELETE FROM fk_notpartitioned_pk WHERE b = 142857;
+SELECT * FROM fk_partitioned_fk WHERE a IS NOT NULL OR b IS NOT NULL ORDER BY a NULLS LAST;
+ROLLBACK;
+
+-- ON DELETE SET DEFAULT column_list
+ALTER TABLE fk_partitioned_fk DROP CONSTRAINT fk_partitioned_fk_a_b_fkey;
+ALTER TABLE fk_partitioned_fk ADD FOREIGN KEY (a, b)
+  REFERENCES fk_notpartitioned_pk
+  ON DELETE SET DEFAULT (a);
+BEGIN;
+DELETE FROM fk_partitioned_fk;
+DELETE FROM fk_notpartitioned_pk;
+INSERT INTO fk_notpartitioned_pk VALUES (500, 100000), (2501, 100000);
+INSERT INTO fk_partitioned_fk VALUES (500, 100000);
+DELETE FROM fk_notpartitioned_pk WHERE a = 500;
+SELECT * FROM fk_partitioned_fk ORDER BY a;
+ROLLBACK;
+
 -- ON UPDATE/DELETE CASCADE
 ALTER TABLE fk_partitioned_fk DROP CONSTRAINT fk_partitioned_fk_a_b_fkey;
 ALTER TABLE fk_partitioned_fk ADD FOREIGN KEY (a, b)
@@ -1636,6 +1687,81 @@ SET CONSTRAINTS fk_a_fkey DEFERRED;
 DELETE FROM pk WHERE a = 1;
 DELETE FROM fk WHERE a = 1;
 COMMIT;							-- OK
+
+-- Verify constraint deferrability when changed by ALTER
+-- Partitioned table at referencing end
+CREATE TABLE pt(f1 int, f2 int, f3 int, PRIMARY KEY(f1,f2));
+CREATE TABLE ref(f1 int, f2 int, f3 int)
+  PARTITION BY list(f1);
+CREATE TABLE ref1 PARTITION OF ref FOR VALUES IN (1);
+CREATE TABLE ref2 PARTITION OF ref FOR VALUES in (2);
+ALTER TABLE ref ADD FOREIGN KEY(f1,f2) REFERENCES pt;
+ALTER TABLE ref ALTER CONSTRAINT ref_f1_f2_fkey
+  DEFERRABLE INITIALLY DEFERRED;
+INSERT INTO pt VALUES(1,2,3);
+INSERT INTO ref VALUES(1,2,3);
+BEGIN;
+DELETE FROM pt;
+DELETE FROM ref;
+ABORT;
+DROP TABLE pt, ref;
+-- Multi-level partitioning at referencing end
+CREATE TABLE pt(f1 int, f2 int, f3 int, PRIMARY KEY(f1,f2));
+CREATE TABLE ref(f1 int, f2 int, f3 int)
+  PARTITION BY list(f1);
+CREATE TABLE ref1_2 PARTITION OF ref FOR VALUES IN (1, 2) PARTITION BY list (f2);
+CREATE TABLE ref1 PARTITION OF ref1_2 FOR VALUES IN (1);
+CREATE TABLE ref2 PARTITION OF ref1_2 FOR VALUES IN (2) PARTITION BY list (f2);
+CREATE TABLE ref22 PARTITION OF ref2 FOR VALUES IN (2);
+ALTER TABLE ref ADD FOREIGN KEY(f1,f2) REFERENCES pt;
+INSERT INTO pt VALUES(1,2,3);
+INSERT INTO ref VALUES(1,2,3);
+ALTER TABLE ref22 ALTER CONSTRAINT ref_f1_f2_fkey
+  DEFERRABLE INITIALLY IMMEDIATE;	-- fails
+ALTER TABLE ref ALTER CONSTRAINT ref_f1_f2_fkey
+  DEFERRABLE INITIALLY DEFERRED;
+BEGIN;
+DELETE FROM pt;
+DELETE FROM ref;
+ABORT;
+DROP TABLE pt, ref;
+
+-- Partitioned table at referenced end
+CREATE TABLE pt(f1 int, f2 int, f3 int, PRIMARY KEY(f1,f2))
+  PARTITION BY LIST(f1);
+CREATE TABLE pt1 PARTITION OF pt FOR VALUES IN (1);
+CREATE TABLE pt2 PARTITION OF pt FOR VALUES IN (2);
+CREATE TABLE ref(f1 int, f2 int, f3 int);
+ALTER TABLE ref ADD FOREIGN KEY(f1,f2) REFERENCES pt;
+ALTER TABLE ref ALTER CONSTRAINT ref_f1_f2_fkey
+  DEFERRABLE INITIALLY DEFERRED;
+INSERT INTO pt VALUES(1,2,3);
+INSERT INTO ref VALUES(1,2,3);
+BEGIN;
+DELETE FROM pt;
+DELETE FROM ref;
+ABORT;
+DROP TABLE pt, ref;
+-- Multi-level partitioning at at referenced end
+CREATE TABLE pt(f1 int, f2 int, f3 int, PRIMARY KEY(f1,f2))
+  PARTITION BY LIST(f1);
+CREATE TABLE pt1_2 PARTITION OF pt FOR VALUES IN (1, 2) PARTITION BY LIST (f1);
+CREATE TABLE pt1 PARTITION OF pt1_2 FOR VALUES IN (1);
+CREATE TABLE pt2 PARTITION OF pt1_2 FOR VALUES IN (2);
+CREATE TABLE ref(f1 int, f2 int, f3 int);
+ALTER TABLE ref ADD FOREIGN KEY(f1,f2) REFERENCES pt;
+ALTER TABLE ref ALTER CONSTRAINT ref_f1_f2_fkey1
+  DEFERRABLE INITIALLY DEFERRED;	-- fails
+ALTER TABLE ref ALTER CONSTRAINT ref_f1_f2_fkey
+  DEFERRABLE INITIALLY DEFERRED;
+INSERT INTO pt VALUES(1,2,3);
+INSERT INTO ref VALUES(1,2,3);
+BEGIN;
+DELETE FROM pt;
+DELETE FROM ref;
+ABORT;
+DROP TABLE pt, ref;
+
 DROP SCHEMA fkpart9 CASCADE;
 
 -- Verify ON UPDATE/DELETE behavior

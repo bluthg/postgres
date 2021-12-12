@@ -24,6 +24,7 @@
 #include "catalog/catalog.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/toasting.h"
 #include "commands/alter.h"
@@ -476,6 +477,7 @@ CheckRestrictedOperation(const char *cmdname)
  *
  *	pstmt: PlannedStmt wrapper for the utility statement
  *	queryString: original source text of command
+ *	readOnlyTree: if true, pstmt's node tree must not be modified
  *	context: identifies source of statement (toplevel client command,
  *		non-toplevel client command, subcommand of a larger utility command)
  *	params: parameters to use during execution
@@ -501,6 +503,7 @@ CheckRestrictedOperation(const char *cmdname)
 void
 ProcessUtility(PlannedStmt *pstmt,
 			   const char *queryString,
+			   bool readOnlyTree,
 			   ProcessUtilityContext context,
 			   ParamListInfo params,
 			   QueryEnvironment *queryEnv,
@@ -518,11 +521,11 @@ ProcessUtility(PlannedStmt *pstmt,
 	 * call standard_ProcessUtility().
 	 */
 	if (ProcessUtility_hook)
-		(*ProcessUtility_hook) (pstmt, queryString,
+		(*ProcessUtility_hook) (pstmt, queryString, readOnlyTree,
 								context, params, queryEnv,
 								dest, qc);
 	else
-		standard_ProcessUtility(pstmt, queryString,
+		standard_ProcessUtility(pstmt, queryString, readOnlyTree,
 								context, params, queryEnv,
 								dest, qc);
 }
@@ -541,13 +544,14 @@ ProcessUtility(PlannedStmt *pstmt,
 void
 standard_ProcessUtility(PlannedStmt *pstmt,
 						const char *queryString,
+						bool readOnlyTree,
 						ProcessUtilityContext context,
 						ParamListInfo params,
 						QueryEnvironment *queryEnv,
 						DestReceiver *dest,
 						QueryCompletion *qc)
 {
-	Node	   *parsetree = pstmt->utilityStmt;
+	Node	   *parsetree;
 	bool		isTopLevel = (context == PROCESS_UTILITY_TOPLEVEL);
 	bool		isAtomicContext = (!(context == PROCESS_UTILITY_TOPLEVEL || context == PROCESS_UTILITY_QUERY_NONATOMIC) || IsTransactionBlock());
 	ParseState *pstate;
@@ -555,6 +559,18 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 
 	/* This can recurse, so check for excessive recursion */
 	check_stack_depth();
+
+	/*
+	 * If the given node tree is read-only, make a copy to ensure that parse
+	 * transformations don't damage the original tree.  This could be
+	 * refactored to avoid making unnecessary copies in more cases, but it's
+	 * not clear that it's worth a great deal of trouble over.  Statements
+	 * that are complex enough to be expensive to copy are exactly the ones
+	 * we'd need to copy, so that only marginal savings seem possible.
+	 */
+	if (readOnlyTree)
+		pstmt = copyObject(pstmt);
+	parsetree = pstmt->utilityStmt;
 
 	/* Prohibit read/write commands in read-only states. */
 	readonly_flags = ClassifyUtilityCommandAsReadOnly(parsetree);
@@ -693,7 +709,7 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 			break;
 
 		case T_DoStmt:
-			ExecuteDoStmt((DoStmt *) parsetree, isAtomicContext);
+			ExecuteDoStmt(pstate, (DoStmt *) parsetree, isAtomicContext);
 			break;
 
 		case T_CreateTableSpaceStmt:
@@ -788,6 +804,23 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 				ListenStmt *stmt = (ListenStmt *) parsetree;
 
 				CheckRestrictedOperation("LISTEN");
+
+				/*
+				 * We don't allow LISTEN in background processes, as there is
+				 * no mechanism for them to collect NOTIFY messages, so they'd
+				 * just block cleanout of the async SLRU indefinitely.
+				 * (Authors of custom background workers could bypass this
+				 * restriction by calling Async_Listen directly, but then it's
+				 * on them to provide some mechanism to process the message
+				 * queue.)  Note there seems no reason to forbid UNLISTEN.
+				 */
+				if (MyBackendType != B_BACKEND)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					/* translator: %s is name of a SQL command, eg LISTEN */
+							 errmsg("cannot execute %s within a background process",
+									"LISTEN")));
+
 				Async_Listen(stmt->conditionname);
 			}
 			break;
@@ -873,7 +906,7 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 
 		case T_AlterRoleStmt:
 			/* no event triggers for global objects */
-			AlterRole((AlterRoleStmt *) parsetree);
+			AlterRole(pstate, (AlterRoleStmt *) parsetree);
 			break;
 
 		case T_AlterRoleSetStmt:
@@ -907,10 +940,10 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 			break;
 
 		case T_CheckPointStmt:
-			if (!superuser())
+			if (!has_privs_of_role(GetUserId(), ROLE_PG_CHECKPOINTER))
 				ereport(ERROR,
 						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						 errmsg("must be superuser to do CHECKPOINT")));
+						 errmsg("must be superuser or have privileges of pg_checkpointer to do CHECKPOINT")));
 
 			RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_WAIT |
 							  (RecoveryInProgress() ? 0 : CHECKPOINT_FORCE));
@@ -1211,6 +1244,7 @@ ProcessUtilitySlow(ParseState *pstate,
 
 							ProcessUtility(wrapper,
 										   queryString,
+										   false,
 										   PROCESS_UTILITY_SUBCOMMAND,
 										   params,
 										   NULL,
@@ -1536,11 +1570,11 @@ ProcessUtilitySlow(ParseState *pstate,
 				break;
 
 			case T_CreateFdwStmt:
-				address = CreateForeignDataWrapper((CreateFdwStmt *) parsetree);
+				address = CreateForeignDataWrapper(pstate, (CreateFdwStmt *) parsetree);
 				break;
 
 			case T_AlterFdwStmt:
-				address = AlterForeignDataWrapper((AlterFdwStmt *) parsetree);
+				address = AlterForeignDataWrapper(pstate, (AlterFdwStmt *) parsetree);
 				break;
 
 			case T_CreateForeignServerStmt:
@@ -1585,7 +1619,7 @@ ProcessUtilitySlow(ParseState *pstate,
 				break;
 
 			case T_CreateRangeStmt: /* CREATE TYPE AS RANGE */
-				address = DefineRange((CreateRangeStmt *) parsetree);
+				address = DefineRange(pstate, (CreateRangeStmt *) parsetree);
 				break;
 
 			case T_AlterEnumStmt:	/* ALTER TYPE (enum) */
@@ -1786,11 +1820,11 @@ ProcessUtilitySlow(ParseState *pstate,
 				break;
 
 			case T_CreatePublicationStmt:
-				address = CreatePublication((CreatePublicationStmt *) parsetree);
+				address = CreatePublication(pstate, (CreatePublicationStmt *) parsetree);
 				break;
 
 			case T_AlterPublicationStmt:
-				AlterPublication((AlterPublicationStmt *) parsetree);
+				AlterPublication(pstate, (AlterPublicationStmt *) parsetree);
 
 				/*
 				 * AlterPublication calls EventTriggerCollectSimpleCommand
@@ -1800,12 +1834,14 @@ ProcessUtilitySlow(ParseState *pstate,
 				break;
 
 			case T_CreateSubscriptionStmt:
-				address = CreateSubscription((CreateSubscriptionStmt *) parsetree,
+				address = CreateSubscription(pstate,
+											 (CreateSubscriptionStmt *) parsetree,
 											 isTopLevel);
 				break;
 
 			case T_AlterSubscriptionStmt:
-				address = AlterSubscription((AlterSubscriptionStmt *) parsetree,
+				address = AlterSubscription(pstate,
+											(AlterSubscriptionStmt *) parsetree,
 											isTopLevel);
 				break;
 
@@ -1848,6 +1884,10 @@ ProcessUtilitySlow(ParseState *pstate,
 
 			case T_AlterStatsStmt:
 				address = AlterStatistics((AlterStatsStmt *) parsetree);
+				break;
+
+			case T_AlterCollationStmt:
+				address = AlterCollation((AlterCollationStmt *) parsetree);
 				break;
 
 			default:
@@ -1914,6 +1954,7 @@ ProcessUtilityForAlterTable(Node *stmt, AlterTableUtilityContext *context)
 
 	ProcessUtility(wrapper,
 				   context->queryString,
+				   false,
 				   PROCESS_UTILITY_SUBCOMMAND,
 				   context->params,
 				   context->queryEnv,
@@ -3001,6 +3042,10 @@ CreateCommandTag(Node *parsetree)
 			tag = CMDTAG_DROP_SUBSCRIPTION;
 			break;
 
+		case T_AlterCollationStmt:
+			tag = CMDTAG_ALTER_COLLATION;
+			break;
+
 		case T_PrepareStmt:
 			tag = CMDTAG_PREPARE;
 			break;
@@ -3614,6 +3659,10 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_AlterStatsStmt:
+			lev = LOGSTMT_DDL;
+			break;
+
+		case T_AlterCollationStmt:
 			lev = LOGSTMT_DDL;
 			break;
 

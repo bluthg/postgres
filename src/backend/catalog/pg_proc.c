@@ -32,8 +32,10 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
+#include "parser/analyze.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_type.h"
+#include "rewrite/rewriteHandler.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
@@ -76,6 +78,7 @@ ProcedureCreate(const char *procedureName,
 				Oid languageValidator,
 				const char *prosrc,
 				const char *probin,
+				Node *prosqlbody,
 				char prokind,
 				bool security_definer,
 				bool isLeakProof,
@@ -339,6 +342,10 @@ ProcedureCreate(const char *procedureName,
 		values[Anum_pg_proc_probin - 1] = CStringGetTextDatum(probin);
 	else
 		nulls[Anum_pg_proc_probin - 1] = true;
+	if (prosqlbody)
+		values[Anum_pg_proc_prosqlbody - 1] = CStringGetTextDatum(nodeToString(prosqlbody));
+	else
+		nulls[Anum_pg_proc_prosqlbody - 1] = true;
 	if (proconfig != PointerGetDatum(NULL))
 		values[Anum_pg_proc_proconfig - 1] = proconfig;
 	else
@@ -465,12 +472,10 @@ ProcedureCreate(const char *procedureName,
 			if (isnull)
 				proargmodes = PointerGetDatum(NULL);	/* just to be sure */
 
-			n_old_arg_names = get_func_input_arg_names(prokind,
-													   proargnames,
+			n_old_arg_names = get_func_input_arg_names(proargnames,
 													   proargmodes,
 													   &old_arg_names);
-			n_new_arg_names = get_func_input_arg_names(prokind,
-													   parameterNames,
+			n_new_arg_names = get_func_input_arg_names(parameterNames,
 													   parameterModes,
 													   &new_arg_names);
 			for (j = 0; j < n_old_arg_names; j++)
@@ -637,6 +642,10 @@ ProcedureCreate(const char *procedureName,
 
 	record_object_address_dependencies(&myself, addrs, DEPENDENCY_NORMAL);
 	free_object_addresses(addrs);
+
+	/* dependency on SQL routine body */
+	if (languageObjectId == SQLlanguageId && prosqlbody)
+		recordDependencyOnExpr(&myself, prosqlbody, NIL, DEPENDENCY_NORMAL);
 
 	/* dependency on parameter default expressions */
 	if (parameterDefaults)
@@ -878,44 +887,81 @@ fmgr_sql_validator(PG_FUNCTION_ARGS)
 		sqlerrcontext.previous = error_context_stack;
 		error_context_stack = &sqlerrcontext;
 
-		/*
-		 * We can't do full prechecking of the function definition if there
-		 * are any polymorphic input types, because actual datatypes of
-		 * expression results will be unresolvable.  The check will be done at
-		 * runtime instead.
-		 *
-		 * We can run the text through the raw parser though; this will at
-		 * least catch silly syntactic errors.
-		 */
-		raw_parsetree_list = pg_parse_query(prosrc);
+		/* If we have prosqlbody, pay attention to that not prosrc */
+		tmp = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_prosqlbody, &isnull);
+		if (!isnull)
+		{
+			Node	   *n;
+			List	   *stored_query_list;
+
+			n = stringToNode(TextDatumGetCString(tmp));
+			if (IsA(n, List))
+				stored_query_list = linitial(castNode(List, n));
+			else
+				stored_query_list = list_make1(n);
+
+			querytree_list = NIL;
+			foreach(lc, stored_query_list)
+			{
+				Query	   *parsetree = lfirst_node(Query, lc);
+				List	   *querytree_sublist;
+
+				/*
+				 * Typically, we'd have acquired locks already while parsing
+				 * the body of the CREATE FUNCTION command.  However, a
+				 * validator function cannot assume that it's only called in
+				 * that context.
+				 */
+				AcquireRewriteLocks(parsetree, true, false);
+				querytree_sublist = pg_rewrite_query(parsetree);
+				querytree_list = lappend(querytree_list, querytree_sublist);
+			}
+		}
+		else
+		{
+			/*
+			 * We can't do full prechecking of the function definition if
+			 * there are any polymorphic input types, because actual datatypes
+			 * of expression results will be unresolvable.  The check will be
+			 * done at runtime instead.
+			 *
+			 * We can run the text through the raw parser though; this will at
+			 * least catch silly syntactic errors.
+			 */
+			raw_parsetree_list = pg_parse_query(prosrc);
+			querytree_list = NIL;
+
+			if (!haspolyarg)
+			{
+				/*
+				 * OK to do full precheck: analyze and rewrite the queries,
+				 * then verify the result type.
+				 */
+				SQLFunctionParseInfoPtr pinfo;
+
+				/* But first, set up parameter information */
+				pinfo = prepare_sql_fn_parse_info(tuple, NULL, InvalidOid);
+
+				foreach(lc, raw_parsetree_list)
+				{
+					RawStmt    *parsetree = lfirst_node(RawStmt, lc);
+					List	   *querytree_sublist;
+
+					querytree_sublist = pg_analyze_and_rewrite_params(parsetree,
+																	  prosrc,
+																	  (ParserSetupHook) sql_fn_parser_setup,
+																	  pinfo,
+																	  NULL);
+					querytree_list = lappend(querytree_list,
+											 querytree_sublist);
+				}
+			}
+		}
 
 		if (!haspolyarg)
 		{
-			/*
-			 * OK to do full precheck: analyze and rewrite the queries, then
-			 * verify the result type.
-			 */
-			SQLFunctionParseInfoPtr pinfo;
 			Oid			rettype;
 			TupleDesc	rettupdesc;
-
-			/* But first, set up parameter information */
-			pinfo = prepare_sql_fn_parse_info(tuple, NULL, InvalidOid);
-
-			querytree_list = NIL;
-			foreach(lc, raw_parsetree_list)
-			{
-				RawStmt    *parsetree = lfirst_node(RawStmt, lc);
-				List	   *querytree_sublist;
-
-				querytree_sublist = pg_analyze_and_rewrite_params(parsetree,
-																  prosrc,
-																  (ParserSetupHook) sql_fn_parser_setup,
-																  pinfo,
-																  NULL);
-				querytree_list = lappend(querytree_list,
-										 querytree_sublist);
-			}
 
 			check_sql_fn_statements(querytree_list);
 

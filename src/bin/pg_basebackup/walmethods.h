@@ -19,6 +19,14 @@ typedef enum
 	CLOSE_NO_RENAME
 } WalCloseMethod;
 
+/* Types of compression supported */
+typedef enum
+{
+	COMPRESSION_GZIP,
+	COMPRESSION_LZ4,
+	COMPRESSION_NONE
+} WalCompressionMethod;
+
 /*
  * A WalWriteMethod structure represents the different methods used
  * to write the streaming WAL as it's received.
@@ -51,6 +59,15 @@ struct WalWriteMethod
 
 	/* Return the size of a file, or -1 on failure. */
 	ssize_t		(*get_file_size) (const char *pathname);
+
+	/*
+	 * Return the name of the current file to work on in pg_malloc()'d string,
+	 * without the base directory.  This is useful for logging.
+	 */
+	char	   *(*get_file_name) (const char *pathname, const char *temp_suffix);
+
+	/* Returns the compression method */
+	WalCompressionMethod (*compression_method) (void);
 
 	/*
 	 * Write count number of bytes to the file, and return the number of bytes
@@ -86,8 +103,11 @@ struct WalWriteMethod
  *						   not all those required for pg_receivewal)
  */
 WalWriteMethod *CreateWalDirectoryMethod(const char *basedir,
+										 WalCompressionMethod compression_method,
 										 int compression, bool sync);
-WalWriteMethod *CreateWalTarMethod(const char *tarbase, int compression, bool sync);
+WalWriteMethod *CreateWalTarMethod(const char *tarbase,
+								   WalCompressionMethod compression_method,
+								   int compression, bool sync);
 
 /* Cleanup routines for previously-created methods */
 void		FreeWalDirectoryMethod(void);

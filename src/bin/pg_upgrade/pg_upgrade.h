@@ -77,8 +77,9 @@ extern char *output_files[];
 #define pg_mv_file			pgrename
 #define PATH_SEPARATOR		'\\'
 #define PATH_QUOTE	'"'
-#define RM_CMD				"DEL /q"
-#define RMDIR_CMD			"RMDIR /s/q"
+/* @ prefix disables command echo in .bat files */
+#define RM_CMD				"@DEL /q"
+#define RMDIR_CMD			"@RMDIR /s/q"
 #define SCRIPT_PREFIX		""
 #define SCRIPT_EXT			"bat"
 #define EXE_EXT				".exe"
@@ -207,6 +208,7 @@ typedef struct
 	uint32		chkpnt_nxtmulti;
 	uint32		chkpnt_nxtmxoff;
 	uint32		chkpnt_oldstMulti;
+	uint32		chkpnt_oldstxid;
 	uint32		align;
 	uint32		blocksz;
 	uint32		largesz;
@@ -292,7 +294,6 @@ typedef struct
 	transferMode transfer_mode; /* copy files or link them? */
 	int			jobs;			/* number of processes/threads to use */
 	char	   *socketdir;		/* directory to use for Unix sockets */
-	bool		ind_coll_unknown;	/* mark unknown index collation versions */
 } UserOpts;
 
 typedef struct
@@ -440,6 +441,12 @@ unsigned int str2uint(const char *str);
 
 /* version.c */
 
+bool		check_for_data_types_usage(ClusterInfo *cluster,
+									   const char *base_query,
+									   const char *output_path);
+bool		check_for_data_type_usage(ClusterInfo *cluster,
+									  const char *type_name,
+									  const char *output_path);
 void		new_9_0_populate_pg_largeobject_metadata(ClusterInfo *cluster,
 													 bool check_mode);
 void		old_9_3_check_for_line_data_type_usage(ClusterInfo *cluster);
@@ -448,6 +455,7 @@ void		old_9_6_invalidate_hash_indexes(ClusterInfo *cluster,
 											bool check_mode);
 
 void		old_11_check_for_sql_identifier_data_type_usage(ClusterInfo *cluster);
+void		report_extension_updates(ClusterInfo *cluster);
 
 /* parallel.c */
 void		parallel_exec_prog(const char *log_file, const char *opt_log_file,

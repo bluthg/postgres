@@ -10,9 +10,6 @@
  * fill WAL segments; the checkpointer itself doesn't watch for the
  * condition.)
  *
- * The checkpointer is started by the postmaster as soon as the startup
- * subprocess finishes, or as soon as recovery begins if we are doing archive
- * recovery.  It remains alive until the postmaster commands it to terminate.
  * Normal termination is by SIGUSR2, which instructs the checkpointer to
  * execute a shutdown checkpoint and then exit(0).  (All backends must be
  * stopped before SIGUSR2 is issued!)  Emergency termination is by SIGQUIT;
@@ -360,7 +357,7 @@ CheckpointerMain(void)
 		if (((volatile CheckpointerShmemStruct *) CheckpointerShmem)->ckpt_flags)
 		{
 			do_checkpoint = true;
-			BgWriterStats.m_requested_checkpoints++;
+			PendingCheckpointerStats.m_requested_checkpoints++;
 		}
 
 		/*
@@ -374,7 +371,7 @@ CheckpointerMain(void)
 		if (elapsed_secs >= CheckPointTimeout)
 		{
 			if (!do_checkpoint)
-				BgWriterStats.m_timed_checkpoints++;
+				PendingCheckpointerStats.m_timed_checkpoints++;
 			do_checkpoint = true;
 			flags |= CHECKPOINT_CAUSE_TIME;
 		}
@@ -387,11 +384,7 @@ CheckpointerMain(void)
 			bool		ckpt_performed = false;
 			bool		do_restartpoint;
 
-			/*
-			 * Check if we should perform a checkpoint or a restartpoint. As a
-			 * side-effect, RecoveryInProgress() initializes TimeLineID if
-			 * it's not set yet.
-			 */
+			/* Check if we should perform a checkpoint or a restartpoint. */
 			do_restartpoint = RecoveryInProgress();
 
 			/*
@@ -496,16 +489,12 @@ CheckpointerMain(void)
 		CheckArchiveTimeout();
 
 		/*
-		 * Send off activity statistics to the stats collector.  (The reason
-		 * why we re-use bgwriter-related code for this is that the bgwriter
-		 * and checkpointer used to be just one process.  It's probably not
-		 * worth the trouble to split the stats support into two independent
-		 * stats message types.)
+		 * Send off activity statistics to the stats collector.
 		 */
-		pgstat_send_bgwriter();
+		pgstat_send_checkpointer();
 
 		/* Send WAL statistics to the stats collector. */
-		pgstat_report_wal();
+		pgstat_send_wal(true);
 
 		/*
 		 * If any checkpoint flags have been set, redo the loop to handle the
@@ -580,10 +569,10 @@ HandleCheckpointerInterrupts(void)
 		 * updates the statistics, increment the checkpoint request and send
 		 * the statistics to the stats collector.
 		 */
-		BgWriterStats.m_requested_checkpoints++;
+		PendingCheckpointerStats.m_requested_checkpoints++;
 		ShutdownXLOG(0, 0);
-		pgstat_send_bgwriter();
-		pgstat_report_wal();
+		pgstat_send_checkpointer();
+		pgstat_send_wal(true);
 
 		/* Normal exit from the checkpointer is here */
 		proc_exit(0);			/* done */
@@ -722,9 +711,9 @@ CheckpointWriteDelay(int flags, double progress)
 		CheckArchiveTimeout();
 
 		/*
-		 * Report interim activity statistics to the stats collector.
+		 * Report interim activity statistics.
 		 */
-		pgstat_send_bgwriter();
+		pgstat_send_checkpointer();
 
 		/*
 		 * This sleep used to be connected to bgwriter_delay, typically 200ms.
@@ -1238,7 +1227,7 @@ CompactCheckpointerRequestQueue(void)
 	}
 	ereport(DEBUG1,
 			(errmsg_internal("compacted fsync request queue from %d entries to %d entries",
-					CheckpointerShmem->num_requests, preserve_count)));
+							 CheckpointerShmem->num_requests, preserve_count)));
 	CheckpointerShmem->num_requests = preserve_count;
 
 	/* Cleanup. */
@@ -1268,8 +1257,10 @@ AbsorbSyncRequests(void)
 	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
 
 	/* Transfer stats counts into pending pgstats message */
-	BgWriterStats.m_buf_written_backend += CheckpointerShmem->num_backend_writes;
-	BgWriterStats.m_buf_fsync_backend += CheckpointerShmem->num_backend_fsync;
+	PendingCheckpointerStats.m_buf_written_backend
+		+= CheckpointerShmem->num_backend_writes;
+	PendingCheckpointerStats.m_buf_fsync_backend
+		+= CheckpointerShmem->num_backend_fsync;
 
 	CheckpointerShmem->num_backend_writes = 0;
 	CheckpointerShmem->num_backend_fsync = 0;

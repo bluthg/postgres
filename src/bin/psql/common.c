@@ -592,12 +592,14 @@ PSQLexec(const char *query)
  * e.g., because of the interrupt, -1 on error.
  */
 int
-PSQLexecWatch(const char *query, const printQueryOpt *opt)
+PSQLexecWatch(const char *query, const printQueryOpt *opt, FILE *printQueryFout)
 {
+	bool		timing = pset.timing;
 	PGresult   *res;
 	double		elapsed_msec = 0;
 	instr_time	before;
 	instr_time	after;
+	FILE	   *fout;
 
 	if (!pset.db)
 	{
@@ -607,7 +609,7 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt)
 
 	SetCancelConn(pset.db);
 
-	if (pset.timing)
+	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
 
 	res = PQexec(pset.db, query);
@@ -620,7 +622,7 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt)
 		return 0;
 	}
 
-	if (pset.timing)
+	if (timing)
 	{
 		INSTR_TIME_SET_CURRENT(after);
 		INSTR_TIME_SUBTRACT(after, before);
@@ -638,14 +640,16 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt)
 		return 0;
 	}
 
+	fout = printQueryFout ? printQueryFout : pset.queryFout;
+
 	switch (PQresultStatus(res))
 	{
 		case PGRES_TUPLES_OK:
-			printQuery(res, opt, pset.queryFout, false, pset.logfile);
+			printQuery(res, opt, fout, false, pset.logfile);
 			break;
 
 		case PGRES_COMMAND_OK:
-			fprintf(pset.queryFout, "%s\n%s\n\n", opt->title, PQcmdStatus(res));
+			fprintf(fout, "%s\n%s\n\n", opt->title, PQcmdStatus(res));
 			break;
 
 		case PGRES_EMPTY_QUERY:
@@ -668,10 +672,10 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt)
 
 	PQclear(res);
 
-	fflush(pset.queryFout);
+	fflush(fout);
 
 	/* Possible microtiming output */
-	if (pset.timing)
+	if (timing)
 		PrintTiming(elapsed_msec);
 
 	return 1;
@@ -1189,6 +1193,7 @@ PrintQueryResults(PGresult *results)
 bool
 SendQuery(const char *query)
 {
+	bool		timing = pset.timing;
 	PGresult   *results;
 	PGTransactionStatusType transaction_status;
 	double		elapsed_msec = 0;
@@ -1297,7 +1302,7 @@ SendQuery(const char *query)
 		instr_time	before,
 					after;
 
-		if (pset.timing)
+		if (timing)
 			INSTR_TIME_SET_CURRENT(before);
 
 		results = PQexec(pset.db, query);
@@ -1306,7 +1311,7 @@ SendQuery(const char *query)
 		ResetCancelConn();
 		OK = ProcessResult(&results);
 
-		if (pset.timing)
+		if (timing)
 		{
 			INSTR_TIME_SET_CURRENT(after);
 			INSTR_TIME_SUBTRACT(after, before);
@@ -1397,7 +1402,7 @@ SendQuery(const char *query)
 	ClearOrSaveResult(results);
 
 	/* Possible microtiming output */
-	if (pset.timing)
+	if (timing)
 		PrintTiming(elapsed_msec);
 
 	/* check for events that may occur during query execution */
@@ -1468,6 +1473,7 @@ sendquery_cleanup:
 static bool
 DescribeQuery(const char *query, double *elapsed_msec)
 {
+	bool		timing = pset.timing;
 	PGresult   *results;
 	bool		OK;
 	instr_time	before,
@@ -1475,7 +1481,7 @@ DescribeQuery(const char *query, double *elapsed_msec)
 
 	*elapsed_msec = 0;
 
-	if (pset.timing)
+	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
 
 	/*
@@ -1547,7 +1553,7 @@ DescribeQuery(const char *query, double *elapsed_msec)
 			results = PQexec(pset.db, buf.data);
 			OK = AcceptResult(results);
 
-			if (pset.timing)
+			if (timing)
 			{
 				INSTR_TIME_SET_CURRENT(after);
 				INSTR_TIME_SUBTRACT(after, before);
@@ -1588,6 +1594,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	PGresult   *results;
 	PQExpBufferData buf;
 	printQueryOpt my_popt = pset.popt;
+	bool		timing = pset.timing;
 	FILE	   *fout;
 	bool		is_pipe;
 	bool		is_pager = false;
@@ -1607,7 +1614,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	my_popt.topt.stop_table = false;
 	my_popt.topt.prior_records = 0;
 
-	if (pset.timing)
+	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
 
 	/* if we're not in a transaction, start one */
@@ -1637,7 +1644,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	if (!OK)
 		goto cleanup;
 
-	if (pset.timing)
+	if (timing)
 	{
 		INSTR_TIME_SET_CURRENT(after);
 		INSTR_TIME_SUBTRACT(after, before);
@@ -1679,13 +1686,13 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 
 	for (;;)
 	{
-		if (pset.timing)
+		if (timing)
 			INSTR_TIME_SET_CURRENT(before);
 
 		/* get fetch_count tuples at a time */
 		results = PQexec(pset.db, fetch_cmd);
 
-		if (pset.timing)
+		if (timing)
 		{
 			INSTR_TIME_SET_CURRENT(after);
 			INSTR_TIME_SUBTRACT(after, before);
@@ -1799,7 +1806,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	}
 
 cleanup:
-	if (pset.timing)
+	if (timing)
 		INSTR_TIME_SET_CURRENT(before);
 
 	/*
@@ -1825,7 +1832,7 @@ cleanup:
 		ClearOrSaveResult(results);
 	}
 
-	if (pset.timing)
+	if (timing)
 	{
 		INSTR_TIME_SET_CURRENT(after);
 		INSTR_TIME_SUBTRACT(after, before);
@@ -1846,7 +1853,7 @@ skip_white_space(const char *query)
 
 	while (*query)
 	{
-		int			mblen = PQmblen(query, pset.encoding);
+		int			mblen = PQmblenBounded(query, pset.encoding);
 
 		/*
 		 * Note: we assume the encoding is a superset of ASCII, so that for
@@ -1883,7 +1890,7 @@ skip_white_space(const char *query)
 					query++;
 					break;
 				}
-				query += PQmblen(query, pset.encoding);
+				query += PQmblenBounded(query, pset.encoding);
 			}
 		}
 		else if (cnestlevel > 0)
@@ -1918,7 +1925,7 @@ command_no_begin(const char *query)
 	 */
 	wordlen = 0;
 	while (isalpha((unsigned char) query[wordlen]))
-		wordlen += PQmblen(&query[wordlen], pset.encoding);
+		wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 	/*
 	 * Transaction control commands.  These should include every keyword that
@@ -1949,7 +1956,7 @@ command_no_begin(const char *query)
 
 		wordlen = 0;
 		while (isalpha((unsigned char) query[wordlen]))
-			wordlen += PQmblen(&query[wordlen], pset.encoding);
+			wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 		if (wordlen == 11 && pg_strncasecmp(query, "transaction", 11) == 0)
 			return true;
@@ -1983,7 +1990,7 @@ command_no_begin(const char *query)
 
 		wordlen = 0;
 		while (isalpha((unsigned char) query[wordlen]))
-			wordlen += PQmblen(&query[wordlen], pset.encoding);
+			wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 		if (wordlen == 8 && pg_strncasecmp(query, "database", 8) == 0)
 			return true;
@@ -1999,7 +2006,7 @@ command_no_begin(const char *query)
 
 			wordlen = 0;
 			while (isalpha((unsigned char) query[wordlen]))
-				wordlen += PQmblen(&query[wordlen], pset.encoding);
+				wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 		}
 
 		if (wordlen == 5 && pg_strncasecmp(query, "index", 5) == 0)
@@ -2010,7 +2017,7 @@ command_no_begin(const char *query)
 
 			wordlen = 0;
 			while (isalpha((unsigned char) query[wordlen]))
-				wordlen += PQmblen(&query[wordlen], pset.encoding);
+				wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 			if (wordlen == 12 && pg_strncasecmp(query, "concurrently", 12) == 0)
 				return true;
@@ -2027,7 +2034,7 @@ command_no_begin(const char *query)
 
 		wordlen = 0;
 		while (isalpha((unsigned char) query[wordlen]))
-			wordlen += PQmblen(&query[wordlen], pset.encoding);
+			wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 		/* ALTER SYSTEM isn't allowed in xacts */
 		if (wordlen == 6 && pg_strncasecmp(query, "system", 6) == 0)
@@ -2050,7 +2057,7 @@ command_no_begin(const char *query)
 
 		wordlen = 0;
 		while (isalpha((unsigned char) query[wordlen]))
-			wordlen += PQmblen(&query[wordlen], pset.encoding);
+			wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 		if (wordlen == 8 && pg_strncasecmp(query, "database", 8) == 0)
 			return true;
@@ -2065,7 +2072,7 @@ command_no_begin(const char *query)
 			query = skip_white_space(query);
 			wordlen = 0;
 			while (isalpha((unsigned char) query[wordlen]))
-				wordlen += PQmblen(&query[wordlen], pset.encoding);
+				wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 			/*
 			 * REINDEX [ TABLE | INDEX ] CONCURRENTLY are not allowed in
@@ -2084,7 +2091,7 @@ command_no_begin(const char *query)
 
 			wordlen = 0;
 			while (isalpha((unsigned char) query[wordlen]))
-				wordlen += PQmblen(&query[wordlen], pset.encoding);
+				wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 			if (wordlen == 12 && pg_strncasecmp(query, "concurrently", 12) == 0)
 				return true;
@@ -2104,7 +2111,7 @@ command_no_begin(const char *query)
 
 		wordlen = 0;
 		while (isalpha((unsigned char) query[wordlen]))
-			wordlen += PQmblen(&query[wordlen], pset.encoding);
+			wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 		if (wordlen == 3 && pg_strncasecmp(query, "all", 3) == 0)
 			return true;
@@ -2140,7 +2147,7 @@ is_select_command(const char *query)
 	 */
 	wordlen = 0;
 	while (isalpha((unsigned char) query[wordlen]))
-		wordlen += PQmblen(&query[wordlen], pset.encoding);
+		wordlen += PQmblenBounded(&query[wordlen], pset.encoding);
 
 	if (wordlen == 6 && pg_strncasecmp(query, "select", 6) == 0)
 		return true;

@@ -15,6 +15,7 @@
 
 #include "access/xlogdefs.h"
 #include "common/logging.h"
+#include "common/pg_prng.h"
 #include "getopt_long.h"
 
 /*
@@ -117,6 +118,8 @@ main(int argc, char *argv[])
 	pqsignal(SIGHUP, signal_cleanup);
 #endif
 
+	pg_prng_seed(&pg_global_prng_state, (uint64) time(NULL));
+
 	prepare_buf();
 
 	test_open();
@@ -217,8 +220,10 @@ handle_args(int argc, char *argv[])
 					"%u seconds per test\n",
 					secs_per_test),
 		   secs_per_test);
-#if PG_O_DIRECT != 0
+#if defined(O_DIRECT)
 	printf(_("O_DIRECT supported on this platform for open_datasync and open_sync.\n"));
+#elif defined(F_NOCACHE)
+	printf(_("F_NOCACHE supported on this platform for open_datasync and open_sync.\n"));
 #else
 	printf(_("Direct I/O is not supported on this platform.\n"));
 #endif
@@ -231,7 +236,7 @@ prepare_buf(void)
 
 	/* write random data into buffer */
 	for (ops = 0; ops < DEFAULT_XLOG_SEG_SIZE; ops++)
-		full_buf[ops] = random();
+		full_buf[ops] = (char) pg_prng_int32(&pg_global_prng_state);
 
 	buf = (char *) TYPEALIGN(XLOG_BLCKSZ, full_buf);
 }
@@ -258,6 +263,31 @@ test_open(void)
 	close(tmpfile);
 }
 
+static int
+open_direct(const char *path, int flags, mode_t mode)
+{
+	int			fd;
+
+#ifdef O_DIRECT
+	flags |= O_DIRECT;
+#endif
+
+	fd = open(path, flags, mode);
+
+#if !defined(O_DIRECT) && defined(F_NOCACHE)
+	if (fd >= 0 && fcntl(fd, F_NOCACHE, 1) < 0)
+	{
+		int			save_errno = errno;
+
+		close(fd);
+		errno = save_errno;
+		return -1;
+	}
+#endif
+
+	return fd;
+}
+
 static void
 test_sync(int writes_per_op)
 {
@@ -279,7 +309,7 @@ test_sync(int writes_per_op)
 	fflush(stdout);
 
 #ifdef OPEN_DATASYNC_FLAG
-	if ((tmpfile = open(filename, O_RDWR | O_DSYNC | PG_O_DIRECT | PG_BINARY, 0)) == -1)
+	if ((tmpfile = open_direct(filename, O_RDWR | O_DSYNC | PG_BINARY, 0)) == -1)
 	{
 		printf(NA_FORMAT, _("n/a*"));
 		fs_warning = true;
@@ -386,7 +416,7 @@ test_sync(int writes_per_op)
 	fflush(stdout);
 
 #ifdef OPEN_SYNC_FLAG
-	if ((tmpfile = open(filename, O_RDWR | OPEN_SYNC_FLAG | PG_O_DIRECT | PG_BINARY, 0)) == -1)
+	if ((tmpfile = open_direct(filename, O_RDWR | OPEN_SYNC_FLAG | PG_BINARY, 0)) == -1)
 	{
 		printf(NA_FORMAT, _("n/a*"));
 		fs_warning = true;
@@ -401,6 +431,7 @@ test_sync(int writes_per_op)
 							  buf,
 							  XLOG_BLCKSZ,
 							  writes * XLOG_BLCKSZ) != XLOG_BLCKSZ)
+
 					/*
 					 * This can generate write failures if the filesystem has
 					 * a large block size, e.g. 4k, and there is no support
@@ -453,7 +484,7 @@ test_open_sync(const char *msg, int writes_size)
 	fflush(stdout);
 
 #ifdef OPEN_SYNC_FLAG
-	if ((tmpfile = open(filename, O_RDWR | OPEN_SYNC_FLAG | PG_O_DIRECT | PG_BINARY, 0)) == -1)
+	if ((tmpfile = open_direct(filename, O_RDWR | OPEN_SYNC_FLAG | PG_BINARY, 0)) == -1)
 		printf(NA_FORMAT, _("n/a*"));
 	else
 	{

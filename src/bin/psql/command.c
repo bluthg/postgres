@@ -13,6 +13,7 @@
 #include <utime.h>
 #ifndef WIN32
 #include <sys/stat.h>			/* for stat() */
+#include <sys/time.h>			/* for setitimer() */
 #include <fcntl.h>				/* open() flags */
 #include <unistd.h>				/* for geteuid(), getpid(), stat() */
 #else
@@ -72,6 +73,9 @@ static backslashResult exec_command_copyright(PsqlScanState scan_state, bool act
 static backslashResult exec_command_crosstabview(PsqlScanState scan_state, bool active_branch);
 static backslashResult exec_command_d(PsqlScanState scan_state, bool active_branch,
 									  const char *cmd);
+static bool exec_command_dfo(PsqlScanState scan_state, const char *cmd,
+							 const char *pattern,
+							 bool show_verbose, bool show_system);
 static backslashResult exec_command_edit(PsqlScanState scan_state, bool active_branch,
 										 PQExpBuffer query_buf, PQExpBuffer previous_buf);
 static backslashResult exec_command_ef_ev(PsqlScanState scan_state, bool active_branch,
@@ -790,7 +794,8 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
 					case 'p':
 					case 't':
 					case 'w':
-						success = describeFunctions(&cmd[2], pattern, show_verbose, show_system);
+						success = exec_command_dfo(scan_state, cmd, pattern,
+												   show_verbose, show_system);
 						break;
 					default:
 						status = PSQL_CMD_UNKNOWN;
@@ -811,7 +816,8 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
 				success = listSchemas(pattern, show_verbose, show_system);
 				break;
 			case 'o':
-				success = describeOperators(pattern, show_verbose, show_system);
+				success = exec_command_dfo(scan_state, cmd, pattern,
+										   show_verbose, show_system);
 				break;
 			case 'O':
 				success = listCollations(pattern, show_verbose, show_system);
@@ -949,6 +955,45 @@ exec_command_d(PsqlScanState scan_state, bool active_branch, const char *cmd)
 		status = PSQL_CMD_ERROR;
 
 	return status;
+}
+
+/* \df and \do; messy enough to split out of exec_command_d */
+static bool
+exec_command_dfo(PsqlScanState scan_state, const char *cmd,
+				 const char *pattern,
+				 bool show_verbose, bool show_system)
+{
+	bool		success;
+	char	   *arg_patterns[FUNC_MAX_ARGS];
+	int			num_arg_patterns = 0;
+
+	/* Collect argument-type patterns too */
+	if (pattern)				/* otherwise it was just \df or \do */
+	{
+		char	   *ap;
+
+		while ((ap = psql_scan_slash_option(scan_state,
+											OT_NORMAL, NULL, true)) != NULL)
+		{
+			arg_patterns[num_arg_patterns++] = ap;
+			if (num_arg_patterns >= FUNC_MAX_ARGS)
+				break;			/* protect limited-size array */
+		}
+	}
+
+	if (cmd[1] == 'f')
+		success = describeFunctions(&cmd[2], pattern,
+									arg_patterns, num_arg_patterns,
+									show_verbose, show_system);
+	else
+		success = describeOperators(pattern,
+									arg_patterns, num_arg_patterns,
+									show_verbose, show_system);
+
+	while (--num_arg_patterns >= 0)
+		free(arg_patterns[num_arg_patterns]);
+
+	return success;
 }
 
 /*
@@ -1978,28 +2023,51 @@ exec_command_password(PsqlScanState scan_state, bool active_branch)
 
 	if (active_branch)
 	{
-		char	   *opt0 = psql_scan_slash_option(scan_state,
+		char	   *user = psql_scan_slash_option(scan_state,
 												  OT_SQLID, NULL, true);
-		char	   *pw1;
-		char	   *pw2;
+		char	   *pw1 = NULL;
+		char	   *pw2 = NULL;
+		PQExpBufferData buf;
+		PromptInterruptContext prompt_ctx;
 
-		pw1 = simple_prompt("Enter new password: ", false);
-		pw2 = simple_prompt("Enter it again: ", false);
+		if (user == NULL)
+		{
+			/* By default, the command applies to CURRENT_USER */
+			PGresult   *res;
 
-		if (strcmp(pw1, pw2) != 0)
+			res = PSQLexec("SELECT CURRENT_USER");
+			if (!res)
+				return PSQL_CMD_ERROR;
+
+			user = pg_strdup(PQgetvalue(res, 0, 0));
+			PQclear(res);
+		}
+
+		/* Set up to let SIGINT cancel simple_prompt_extended() */
+		prompt_ctx.jmpbuf = sigint_interrupt_jmp;
+		prompt_ctx.enabled = &sigint_interrupt_enabled;
+		prompt_ctx.canceled = false;
+
+		initPQExpBuffer(&buf);
+		printfPQExpBuffer(&buf, _("Enter new password for user \"%s\": "), user);
+
+		pw1 = simple_prompt_extended(buf.data, false, &prompt_ctx);
+		if (!prompt_ctx.canceled)
+			pw2 = simple_prompt_extended("Enter it again: ", false, &prompt_ctx);
+
+		if (prompt_ctx.canceled)
+		{
+			/* fail silently */
+			success = false;
+		}
+		else if (strcmp(pw1, pw2) != 0)
 		{
 			pg_log_error("Passwords didn't match.");
 			success = false;
 		}
 		else
 		{
-			char	   *user;
 			char	   *encrypted_password;
-
-			if (opt0)
-				user = opt0;
-			else
-				user = PQuser(pset.db);
 
 			encrypted_password = PQencryptPasswordConn(pset.db, pw1, user, NULL);
 
@@ -2010,15 +2078,12 @@ exec_command_password(PsqlScanState scan_state, bool active_branch)
 			}
 			else
 			{
-				PQExpBufferData buf;
 				PGresult   *res;
 
-				initPQExpBuffer(&buf);
 				printfPQExpBuffer(&buf, "ALTER USER %s PASSWORD ",
 								  fmtId(user));
 				appendStringLiteralConn(&buf, encrypted_password, pset.db);
 				res = PSQLexec(buf.data);
-				termPQExpBuffer(&buf);
 				if (!res)
 					success = false;
 				else
@@ -2027,10 +2092,12 @@ exec_command_password(PsqlScanState scan_state, bool active_branch)
 			}
 		}
 
-		if (opt0)
-			free(opt0);
-		free(pw1);
-		free(pw2);
+		free(user);
+		if (pw1)
+			free(pw1);
+		if (pw2)
+			free(pw2);
+		termPQExpBuffer(&buf);
 	}
 	else
 		ignore_slash_options(scan_state);
@@ -2065,6 +2132,12 @@ exec_command_prompt(PsqlScanState scan_state, bool active_branch,
 		else
 		{
 			char	   *result;
+			PromptInterruptContext prompt_ctx;
+
+			/* Set up to let SIGINT cancel simple_prompt_extended() */
+			prompt_ctx.jmpbuf = sigint_interrupt_jmp;
+			prompt_ctx.enabled = &sigint_interrupt_enabled;
+			prompt_ctx.canceled = false;
 
 			if (arg2)
 			{
@@ -2076,7 +2149,7 @@ exec_command_prompt(PsqlScanState scan_state, bool active_branch,
 
 			if (!pset.inputfile)
 			{
-				result = simple_prompt(prompt_text, true);
+				result = simple_prompt_extended(prompt_text, true, &prompt_ctx);
 			}
 			else
 			{
@@ -2094,8 +2167,8 @@ exec_command_prompt(PsqlScanState scan_state, bool active_branch,
 				}
 			}
 
-			if (result &&
-				!SetVariable(pset.vars, opt, result))
+			if (prompt_ctx.canceled ||
+				(result && !SetVariable(pset.vars, opt, result)))
 				success = false;
 
 			if (result)
@@ -2991,24 +3064,36 @@ copy_previous_query(PQExpBuffer query_buf, PQExpBuffer previous_buf)
 
 /*
  * Ask the user for a password; 'username' is the username the
- * password is for, if one has been explicitly specified. Returns a
- * malloc'd string.
+ * password is for, if one has been explicitly specified.
+ * Returns a malloc'd string.
+ * If 'canceled' is provided, *canceled will be set to true if the prompt
+ * is canceled via SIGINT, and to false otherwise.
  */
 static char *
-prompt_for_password(const char *username)
+prompt_for_password(const char *username, bool *canceled)
 {
 	char	   *result;
+	PromptInterruptContext prompt_ctx;
+
+	/* Set up to let SIGINT cancel simple_prompt_extended() */
+	prompt_ctx.jmpbuf = sigint_interrupt_jmp;
+	prompt_ctx.enabled = &sigint_interrupt_enabled;
+	prompt_ctx.canceled = false;
 
 	if (username == NULL || username[0] == '\0')
-		result = simple_prompt("Password: ", false);
+		result = simple_prompt_extended("Password: ", false, &prompt_ctx);
 	else
 	{
 		char	   *prompt_text;
 
 		prompt_text = psprintf(_("Password for user %s: "), username);
-		result = simple_prompt(prompt_text, false);
+		result = simple_prompt_extended(prompt_text, false, &prompt_ctx);
 		free(prompt_text);
 	}
+
+	if (canceled)
+		*canceled = prompt_ctx.canceled;
+
 	return result;
 }
 
@@ -3264,6 +3349,8 @@ do_connect(enum trivalue reuse_previous_specification,
 	 */
 	if (pset.getPassword == TRI_YES && success)
 	{
+		bool		canceled = false;
+
 		/*
 		 * If a connstring or URI is provided, we don't know which username
 		 * will be used, since we haven't dug that out of the connstring.
@@ -3271,7 +3358,9 @@ do_connect(enum trivalue reuse_previous_specification,
 		 * not seem worth working harder, since this getPassword setting is
 		 * normally only used in noninteractive cases.
 		 */
-		password = prompt_for_password(has_connection_string ? NULL : user);
+		password = prompt_for_password(has_connection_string ? NULL : user,
+									   &canceled);
+		success = !canceled;
 	}
 
 	/*
@@ -3350,13 +3439,16 @@ do_connect(enum trivalue reuse_previous_specification,
 		 */
 		if (!password && PQconnectionNeedsPassword(n_conn) && pset.getPassword != TRI_NO)
 		{
+			bool		canceled = false;
+
 			/*
 			 * Prompt for password using the username we actually connected
 			 * with --- it might've come out of "dbname" rather than "user".
 			 */
-			password = prompt_for_password(PQuser(n_conn));
+			password = prompt_for_password(PQuser(n_conn), &canceled);
 			PQfinish(n_conn);
 			n_conn = NULL;
+			success = !canceled;
 			continue;
 		}
 
@@ -4850,13 +4942,74 @@ do_watch(PQExpBuffer query_buf, double sleep)
 	const char *strftime_fmt;
 	const char *user_title;
 	char	   *title;
+	const char *pagerprog = NULL;
+	FILE	   *pagerpipe = NULL;
 	int			title_len;
 	int			res = 0;
+#ifdef HAVE_POSIX_DECL_SIGWAIT
+	sigset_t	sigalrm_sigchld_sigint;
+	sigset_t	sigalrm_sigchld;
+	sigset_t	sigint;
+	struct itimerval interval;
+	bool		done = false;
+#endif
 
 	if (!query_buf || query_buf->len <= 0)
 	{
 		pg_log_error("\\watch cannot be used with an empty query");
 		return false;
+	}
+
+#ifdef HAVE_POSIX_DECL_SIGWAIT
+	sigemptyset(&sigalrm_sigchld_sigint);
+	sigaddset(&sigalrm_sigchld_sigint, SIGCHLD);
+	sigaddset(&sigalrm_sigchld_sigint, SIGALRM);
+	sigaddset(&sigalrm_sigchld_sigint, SIGINT);
+
+	sigemptyset(&sigalrm_sigchld);
+	sigaddset(&sigalrm_sigchld, SIGCHLD);
+	sigaddset(&sigalrm_sigchld, SIGALRM);
+
+	sigemptyset(&sigint);
+	sigaddset(&sigint, SIGINT);
+
+	/*
+	 * Block SIGALRM and SIGCHLD before we start the timer and the pager (if
+	 * configured), to avoid races.  sigwait() will receive them.
+	 */
+	sigprocmask(SIG_BLOCK, &sigalrm_sigchld, NULL);
+
+	/*
+	 * Set a timer to interrupt sigwait() so we can run the query at the
+	 * requested intervals.
+	 */
+	interval.it_value.tv_sec = sleep_ms / 1000;
+	interval.it_value.tv_usec = (sleep_ms % 1000) * 1000;
+	interval.it_interval = interval.it_value;
+	if (setitimer(ITIMER_REAL, &interval, NULL) < 0)
+	{
+		pg_log_error("could not set timer: %m");
+		done = true;
+	}
+#endif
+
+	/*
+	 * For \watch, we ignore the size of the result and always use the pager
+	 * if PSQL_WATCH_PAGER is set.  We also ignore the regular PSQL_PAGER or
+	 * PAGER environment variables, because traditional pagers probably won't
+	 * be very useful for showing a stream of results.
+	 */
+#ifdef HAVE_POSIX_DECL_SIGWAIT
+	pagerprog = getenv("PSQL_WATCH_PAGER");
+#endif
+	if (pagerprog && myopt.topt.pager)
+	{
+		disable_sigpipe_trap();
+		pagerpipe = popen(pagerprog, "w");
+
+		if (!pagerpipe)
+			/* silently proceed without pager */
+			restore_sigpipe_trap();
 	}
 
 	/*
@@ -4867,10 +5020,12 @@ do_watch(PQExpBuffer query_buf, double sleep)
 	strftime_fmt = "%c";
 
 	/*
-	 * Set up rendering options, in particular, disable the pager, because
-	 * nobody wants to be prompted while watching the output of 'watch'.
+	 * Set up rendering options, in particular, disable the pager unless
+	 * PSQL_WATCH_PAGER was successfully launched.
 	 */
-	myopt.topt.pager = 0;
+	if (!pagerpipe)
+		myopt.topt.pager = 0;
+
 
 	/*
 	 * If there's a title in the user configuration, make sure we have room
@@ -4885,7 +5040,6 @@ do_watch(PQExpBuffer query_buf, double sleep)
 	{
 		time_t		timer;
 		char		timebuf[128];
-		long		i;
 
 		/*
 		 * Prepare title for output.  Note that we intentionally include a
@@ -4904,7 +5058,7 @@ do_watch(PQExpBuffer query_buf, double sleep)
 		myopt.title = title;
 
 		/* Run the query and print out the results */
-		res = PSQLexecWatch(query_buf->data, &myopt);
+		res = PSQLexecWatch(query_buf->data, &myopt, pagerpipe);
 
 		/*
 		 * PSQLexecWatch handles the case where we can no longer repeat the
@@ -4912,6 +5066,11 @@ do_watch(PQExpBuffer query_buf, double sleep)
 		 */
 		if (res <= 0)
 			break;
+
+		if (pagerpipe && ferror(pagerpipe))
+			break;
+
+#ifndef HAVE_POSIX_DECL_SIGWAIT
 
 		/*
 		 * Set up cancellation of 'watch' via SIGINT.  We redo this each time
@@ -4923,12 +5082,10 @@ do_watch(PQExpBuffer query_buf, double sleep)
 
 		/*
 		 * Enable 'watch' cancellations and wait a while before running the
-		 * query again.  Break the sleep into short intervals (at most 1s)
-		 * since pg_usleep isn't interruptible on some platforms.
+		 * query again.  Break the sleep into short intervals (at most 1s).
 		 */
 		sigint_interrupt_enabled = true;
-		i = sleep_ms;
-		while (i > 0)
+		for (long i = sleep_ms; i > 0;)
 		{
 			long		s = Min(i, 1000L);
 
@@ -4938,7 +5095,57 @@ do_watch(PQExpBuffer query_buf, double sleep)
 			i -= s;
 		}
 		sigint_interrupt_enabled = false;
+#else
+		/* sigwait() will handle SIGINT. */
+		sigprocmask(SIG_BLOCK, &sigint, NULL);
+		if (cancel_pressed)
+			done = true;
+
+		/* Wait for SIGINT, SIGCHLD or SIGALRM. */
+		while (!done)
+		{
+			int			signal_received;
+
+			errno = sigwait(&sigalrm_sigchld_sigint, &signal_received);
+			if (errno != 0)
+			{
+				/* Some other signal arrived? */
+				if (errno == EINTR)
+					continue;
+				else
+				{
+					pg_log_error("could not wait for signals: %m");
+					done = true;
+					break;
+				}
+			}
+			/* On ^C or pager exit, it's time to stop running the query. */
+			if (signal_received == SIGINT || signal_received == SIGCHLD)
+				done = true;
+			/* Otherwise, we must have SIGALRM.  Time to run the query again. */
+			break;
+		}
+
+		/* Unblock SIGINT so that slow queries can be interrupted. */
+		sigprocmask(SIG_UNBLOCK, &sigint, NULL);
+		if (done)
+			break;
+#endif
 	}
+
+	if (pagerpipe)
+	{
+		pclose(pagerpipe);
+		restore_sigpipe_trap();
+	}
+
+#ifdef HAVE_POSIX_DECL_SIGWAIT
+	/* Disable the interval timer. */
+	memset(&interval, 0, sizeof(interval));
+	setitimer(ITIMER_REAL, &interval, NULL);
+	/* Unblock SIGINT, SIGCHLD and SIGALRM. */
+	sigprocmask(SIG_UNBLOCK, &sigalrm_sigchld_sigint, NULL);
+#endif
 
 	pg_free(title);
 	return (res >= 0);

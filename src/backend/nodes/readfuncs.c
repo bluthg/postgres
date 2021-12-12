@@ -263,6 +263,7 @@ _readQuery(void)
 	READ_BOOL_FIELD(hasModifyingCTE);
 	READ_BOOL_FIELD(hasForUpdate);
 	READ_BOOL_FIELD(hasRowSecurity);
+	READ_BOOL_FIELD(isReturn);
 	READ_NODE_FIELD(cteList);
 	READ_NODE_FIELD(rtable);
 	READ_NODE_FIELD(jointree);
@@ -576,7 +577,7 @@ _readVar(void)
 {
 	READ_LOCALS(Var);
 
-	READ_UINT_FIELD(varno);
+	READ_INT_FIELD(varno);
 	READ_INT_FIELD(varattno);
 	READ_OID_FIELD(vartype);
 	READ_INT_FIELD(vartypmod);
@@ -830,6 +831,8 @@ _readScalarArrayOpExpr(void)
 
 	READ_OID_FIELD(opno);
 	READ_OID_FIELD(opfuncid);
+	READ_OID_FIELD(hashfuncid);
+	READ_OID_FIELD(negfuncid);
 	READ_BOOL_FIELD(useOr);
 	READ_OID_FIELD(inputcollid);
 	READ_NODE_FIELD(args);
@@ -1695,6 +1698,7 @@ _readModifyTable(void)
 	READ_ENUM_FIELD(onConflictAction, OnConflictAction);
 	READ_NODE_FIELD(arbiterIndexes);
 	READ_NODE_FIELD(onConflictSet);
+	READ_NODE_FIELD(onConflictCols);
 	READ_NODE_FIELD(onConflictWhere);
 	READ_UINT_FIELD(exclRelRTI);
 	READ_NODE_FIELD(exclRelTlist);
@@ -1829,7 +1833,7 @@ _readSeqScan(void)
 {
 	READ_LOCALS_NO_FIELDS(SeqScan);
 
-	ReadCommonScan(local_node);
+	ReadCommonScan(&local_node->scan);
 
 	READ_DONE();
 }
@@ -2070,6 +2074,7 @@ _readForeignScan(void)
 	ReadCommonScan(&local_node->scan);
 
 	READ_ENUM_FIELD(operation, CmdType);
+	READ_UINT_FIELD(resultRelation);
 	READ_OID_FIELD(fs_server);
 	READ_NODE_FIELD(fdw_exprs);
 	READ_NODE_FIELD(fdw_private);
@@ -2077,7 +2082,6 @@ _readForeignScan(void)
 	READ_NODE_FIELD(fdw_recheck_quals);
 	READ_BITMAPSET_FIELD(fs_relids);
 	READ_BOOL_FIELD(fsSystemCol);
-	READ_INT_FIELD(resultRelation);
 
 	READ_DONE();
 }
@@ -2212,12 +2216,12 @@ _readMaterial(void)
 }
 
 /*
- * _readResultCache
+ * _readMemoize
  */
-static ResultCache *
-_readResultCache(void)
+static Memoize *
+_readMemoize(void)
 {
-	READ_LOCALS(ResultCache);
+	READ_LOCALS(Memoize);
 
 	ReadCommonPlan(&local_node->plan);
 
@@ -2226,7 +2230,9 @@ _readResultCache(void)
 	READ_OID_ARRAY(collations, local_node->numKeys);
 	READ_NODE_FIELD(param_exprs);
 	READ_BOOL_FIELD(singlerow);
+	READ_BOOL_FIELD(binary_mode);
 	READ_UINT_FIELD(est_entries);
+	READ_BITMAPSET_FIELD(keyparamids);
 
 	READ_DONE();
 }
@@ -2791,23 +2797,23 @@ parseNodeString(void)
 		return_value = _readArrayCoerceExpr();
 	else if (MATCH("CONVERTROWTYPEEXPR", 18))
 		return_value = _readConvertRowtypeExpr();
-	else if (MATCH("COLLATE", 7))
+	else if (MATCH("COLLATEEXPR", 11))
 		return_value = _readCollateExpr();
-	else if (MATCH("CASE", 4))
+	else if (MATCH("CASEEXPR", 8))
 		return_value = _readCaseExpr();
-	else if (MATCH("WHEN", 4))
+	else if (MATCH("CASEWHEN", 8))
 		return_value = _readCaseWhen();
 	else if (MATCH("CASETESTEXPR", 12))
 		return_value = _readCaseTestExpr();
-	else if (MATCH("ARRAY", 5))
+	else if (MATCH("ARRAYEXPR", 9))
 		return_value = _readArrayExpr();
-	else if (MATCH("ROW", 3))
+	else if (MATCH("ROWEXPR", 7))
 		return_value = _readRowExpr();
-	else if (MATCH("ROWCOMPARE", 10))
+	else if (MATCH("ROWCOMPAREEXPR", 14))
 		return_value = _readRowCompareExpr();
-	else if (MATCH("COALESCE", 8))
+	else if (MATCH("COALESCEEXPR", 12))
 		return_value = _readCoalesceExpr();
-	else if (MATCH("MINMAX", 6))
+	else if (MATCH("MINMAXEXPR", 10))
 		return_value = _readMinMaxExpr();
 	else if (MATCH("SQLVALUEFUNCTION", 16))
 		return_value = _readSQLValueFunction();
@@ -2841,17 +2847,17 @@ parseNodeString(void)
 		return_value = _readOnConflictExpr();
 	else if (MATCH("APPENDRELINFO", 13))
 		return_value = _readAppendRelInfo();
-	else if (MATCH("RTE", 3))
+	else if (MATCH("RANGETBLENTRY", 13))
 		return_value = _readRangeTblEntry();
 	else if (MATCH("RANGETBLFUNCTION", 16))
 		return_value = _readRangeTblFunction();
 	else if (MATCH("TABLESAMPLECLAUSE", 17))
 		return_value = _readTableSampleClause();
-	else if (MATCH("NOTIFY", 6))
+	else if (MATCH("NOTIFYSTMT", 10))
 		return_value = _readNotifyStmt();
 	else if (MATCH("DEFELEM", 7))
 		return_value = _readDefElem();
-	else if (MATCH("DECLARECURSOR", 13))
+	else if (MATCH("DECLARECURSORSTMT", 17))
 		return_value = _readDeclareCursorStmt();
 	else if (MATCH("PLANNEDSTMT", 11))
 		return_value = _readPlannedStmt();
@@ -2919,8 +2925,8 @@ parseNodeString(void)
 		return_value = _readHashJoin();
 	else if (MATCH("MATERIAL", 8))
 		return_value = _readMaterial();
-	else if (MATCH("RESULTCACHE", 11))
-		return_value = _readResultCache();
+	else if (MATCH("MEMOIZE", 7))
+		return_value = _readMemoize();
 	else if (MATCH("SORT", 4))
 		return_value = _readSort();
 	else if (MATCH("INCREMENTALSORT", 15))

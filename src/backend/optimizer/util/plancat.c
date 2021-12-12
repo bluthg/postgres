@@ -27,7 +27,6 @@
 #include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "catalog/heap.h"
-#include "catalog/index.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic_ext.h"
@@ -198,14 +197,6 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			 */
 			indexRelation = index_open(indexoid, lmode);
 			index = indexRelation->rd_index;
-
-			/* Warn if any dependent collations' versions have moved. */
-			if (!IsSystemRelation(relation) &&
-				!indexRelation->rd_version_checked)
-			{
-				index_check_collation_versions(indexoid);
-				indexRelation->rd_version_checked = true;
-			}
 
 			/*
 			 * Ignore invalid indexes, since they can't safely be used for
@@ -974,17 +965,13 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 	BlockNumber relallvisible;
 	double		density;
 
-	switch (rel->rd_rel->relkind)
+	if (RELKIND_HAS_TABLE_AM(rel->rd_rel->relkind))
 	{
-		case RELKIND_RELATION:
-		case RELKIND_MATVIEW:
-		case RELKIND_TOASTVALUE:
 			table_relation_estimate_size(rel, attr_widths, pages, tuples,
 										 allvisfrac);
-			break;
-
-		case RELKIND_INDEX:
-
+	}
+	else if (rel->rd_rel->relkind == RELKIND_INDEX)
+	{
 			/*
 			 * XXX: It'd probably be good to move this into a callback,
 			 * individual index types e.g. know if they have a metapage.
@@ -1000,7 +987,7 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 			{
 				*tuples = 0;
 				*allvisfrac = 0;
-				break;
+				return;
 			}
 
 			/* coerce values in pg_class to more desirable types */
@@ -1064,27 +1051,18 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 				*allvisfrac = 1;
 			else
 				*allvisfrac = (double) relallvisible / curpages;
-			break;
-
-		case RELKIND_SEQUENCE:
-			/* Sequences always have a known size */
-			*pages = 1;
-			*tuples = 1;
-			*allvisfrac = 0;
-			break;
-		case RELKIND_FOREIGN_TABLE:
-			/* Just use whatever's in pg_class */
-			/* Note that FDW must cope if reltuples is -1! */
+	}
+	else
+	{
+			/*
+			 * Just use whatever's in pg_class.  This covers foreign tables,
+			 * sequences, and also relkinds without storage (shouldn't get
+			 * here?); see initializations in AddNewRelationTuple().  Note
+			 * that FDW must cope if reltuples is -1!
+			 */
 			*pages = rel->rd_rel->relpages;
 			*tuples = rel->rd_rel->reltuples;
 			*allvisfrac = 0;
-			break;
-		default:
-			/* else it has no disk storage; probably shouldn't get here? */
-			*pages = 0;
-			*tuples = 0;
-			*allvisfrac = 0;
-			break;
 	}
 }
 
@@ -2200,7 +2178,7 @@ set_relation_partition_info(PlannerInfo *root, RelOptInfo *rel,
 	if (root->glob->partition_directory == NULL)
 	{
 		root->glob->partition_directory =
-			CreatePartitionDirectory(CurrentMemoryContext, false);
+			CreatePartitionDirectory(CurrentMemoryContext, true);
 	}
 
 	partdesc = PartitionDirectoryLookup(root->glob->partition_directory,

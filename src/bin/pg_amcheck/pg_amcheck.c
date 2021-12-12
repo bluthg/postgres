@@ -12,6 +12,7 @@
  */
 #include "postgres_fe.h"
 
+#include <limits.h>
 #include <time.h>
 
 #include "catalog/pg_am_d.h"
@@ -55,11 +56,17 @@ typedef struct AmcheckOptions
 	bool		dbpattern;
 	bool		alldb;
 	bool		echo;
-	bool		quiet;
 	bool		verbose;
 	bool		strict_names;
 	bool		show_progress;
 	int			jobs;
+
+	/*
+	 * Whether to install missing extensions, and optionally the name of the
+	 * schema in which to install the extension's objects.
+	 */
+	bool		install_missing;
+	char	   *install_schema;
 
 	/* Objects to check or not to check, as lists of PatternInfo structs. */
 	PatternInfoArray include;
@@ -104,11 +111,12 @@ static AmcheckOptions opts = {
 	.dbpattern = false,
 	.alldb = false,
 	.echo = false,
-	.quiet = false,
 	.verbose = false,
 	.strict_names = true,
 	.show_progress = false,
 	.jobs = 1,
+	.install_missing = false,
+	.install_schema = "pg_catalog",
 	.include = {NULL, 0},
 	.exclude = {NULL, 0},
 	.excludetbl = false,
@@ -240,7 +248,6 @@ main(int argc, char *argv[])
 		{"exclude-index", required_argument, NULL, 'I'},
 		{"jobs", required_argument, NULL, 'j'},
 		{"progress", no_argument, NULL, 'P'},
-		{"quiet", no_argument, NULL, 'q'},
 		{"relation", required_argument, NULL, 'r'},
 		{"exclude-relation", required_argument, NULL, 'R'},
 		{"schema", required_argument, NULL, 's'},
@@ -259,6 +266,7 @@ main(int argc, char *argv[])
 		{"no-strict-names", no_argument, NULL, 10},
 		{"heapallindexed", no_argument, NULL, 11},
 		{"parent-check", no_argument, NULL, 12},
+		{"install-missing", optional_argument, NULL, 13},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -283,10 +291,11 @@ main(int argc, char *argv[])
 	handle_help_version_opts(argc, argv, progname, help);
 
 	/* process command-line options */
-	while ((c = getopt_long(argc, argv, "ad:D:eh:Hi:I:j:p:Pqr:R:s:S:t:T:U:wWv",
+	while ((c = getopt_long(argc, argv, "ad:D:eh:Hi:I:j:p:Pr:R:s:S:t:T:U:wWv",
 							long_options, &optindex)) != -1)
 	{
 		char	   *endptr;
+		unsigned long optval;
 
 		switch (c)
 		{
@@ -316,22 +325,15 @@ main(int argc, char *argv[])
 				append_btree_pattern(&opts.exclude, optarg, encoding);
 				break;
 			case 'j':
-				opts.jobs = atoi(optarg);
-				if (opts.jobs < 1)
-				{
-					fprintf(stderr,
-							"number of parallel jobs must be at least 1\n");
+				if (!option_parse_int(optarg, "-j/--jobs", 1, INT_MAX,
+									  &opts.jobs))
 					exit(1);
-				}
 				break;
 			case 'p':
 				port = pg_strdup(optarg);
 				break;
 			case 'P':
 				opts.show_progress = true;
-				break;
-			case 'q':
-				opts.quiet = true;
 				break;
 			case 'r':
 				opts.allrel = false;
@@ -388,44 +390,46 @@ main(int argc, char *argv[])
 				break;
 			case 6:
 				if (pg_strcasecmp(optarg, "all-visible") == 0)
-					opts.skip = "all visible";
+					opts.skip = "all-visible";
 				else if (pg_strcasecmp(optarg, "all-frozen") == 0)
-					opts.skip = "all frozen";
+					opts.skip = "all-frozen";
+				else if (pg_strcasecmp(optarg, "none") == 0)
+					opts.skip = "none";
 				else
 				{
-					fprintf(stderr, "invalid skip option\n");
+					pg_log_error("invalid argument for option %s", "--skip");
 					exit(1);
 				}
 				break;
 			case 7:
-				opts.startblock = strtol(optarg, &endptr, 10);
-				if (*endptr != '\0')
+				errno = 0;
+				optval = strtoul(optarg, &endptr, 10);
+				if (endptr == optarg || *endptr != '\0' || errno != 0)
 				{
-					fprintf(stderr,
-							"invalid start block\n");
+					pg_log_error("invalid start block");
 					exit(1);
 				}
-				if (opts.startblock > MaxBlockNumber || opts.startblock < 0)
+				if (optval > MaxBlockNumber)
 				{
-					fprintf(stderr,
-							"start block out of bounds\n");
+					pg_log_error("start block out of bounds");
 					exit(1);
 				}
+				opts.startblock = optval;
 				break;
 			case 8:
-				opts.endblock = strtol(optarg, &endptr, 10);
-				if (*endptr != '\0')
+				errno = 0;
+				optval = strtoul(optarg, &endptr, 10);
+				if (endptr == optarg || *endptr != '\0' || errno != 0)
 				{
-					fprintf(stderr,
-							"invalid end block\n");
+					pg_log_error("invalid end block");
 					exit(1);
 				}
-				if (opts.endblock > MaxBlockNumber || opts.endblock < 0)
+				if (optval > MaxBlockNumber)
 				{
-					fprintf(stderr,
-							"end block out of bounds\n");
+					pg_log_error("end block out of bounds");
 					exit(1);
 				}
+				opts.endblock = optval;
 				break;
 			case 9:
 				opts.rootdescend = true;
@@ -440,9 +444,14 @@ main(int argc, char *argv[])
 			case 12:
 				opts.parent_check = true;
 				break;
+			case 13:
+				opts.install_missing = true;
+				if (optarg)
+					opts.install_schema = pg_strdup(optarg);
+				break;
 			default:
 				fprintf(stderr,
-						"Try \"%s --help\" for more information.\n",
+						_("Try \"%s --help\" for more information.\n"),
 						progname);
 				exit(1);
 		}
@@ -450,8 +459,7 @@ main(int argc, char *argv[])
 
 	if (opts.endblock >= 0 && opts.endblock < opts.startblock)
 	{
-		fprintf(stderr,
-				"end block precedes start block\n");
+		pg_log_error("end block precedes start block");
 		exit(1);
 	}
 
@@ -550,6 +558,29 @@ main(int argc, char *argv[])
 		}
 
 		/*
+		 * Optionally install amcheck if not already installed in this
+		 * database.
+		 */
+		if (opts.install_missing)
+		{
+			char	   *schema;
+			char	   *install_sql;
+
+			/*
+			 * Must re-escape the schema name for each database, as the
+			 * escaping rules may change.
+			 */
+			schema = PQescapeIdentifier(conn, opts.install_schema,
+										strlen(opts.install_schema));
+			install_sql = psprintf("CREATE EXTENSION IF NOT EXISTS amcheck WITH SCHEMA %s",
+								   schema);
+
+			executeCommand(conn, install_sql, opts.echo);
+			pfree(install_sql);
+			pfree(schema);
+		}
+
+		/*
 		 * Verify that amcheck is installed for this next database.  User
 		 * error could result in a database not having amcheck that should
 		 * have it, but we also could be iterating over multiple databases
@@ -600,21 +631,18 @@ main(int argc, char *argv[])
 		{
 			failed = opts.strict_names;
 
-			if (!opts.quiet || failed)
-			{
-				if (pat->heap_only)
-					log_no_match("no heap tables to check matching \"%s\"",
-								 pat->pattern);
-				else if (pat->btree_only)
-					log_no_match("no btree indexes to check matching \"%s\"",
-								 pat->pattern);
-				else if (pat->rel_regex == NULL)
-					log_no_match("no relations to check in schemas matching \"%s\"",
-								 pat->pattern);
-				else
-					log_no_match("no relations to check matching \"%s\"",
-								 pat->pattern);
-			}
+			if (pat->heap_only)
+				log_no_match("no heap tables to check matching \"%s\"",
+							 pat->pattern);
+			else if (pat->btree_only)
+				log_no_match("no btree indexes to check matching \"%s\"",
+							 pat->pattern);
+			else if (pat->rel_regex == NULL)
+				log_no_match("no relations to check in schemas matching \"%s\"",
+							 pat->pattern);
+			else
+				log_no_match("no relations to check matching \"%s\"",
+							 pat->pattern);
 		}
 	}
 
@@ -712,8 +740,6 @@ main(int argc, char *argv[])
 
 		if (opts.verbose)
 			PQsetErrorVerbosity(free_slot->connection, PQERRORS_VERBOSE);
-		else if (opts.quiet)
-			PQsetErrorVerbosity(free_slot->connection, PQERRORS_TERSE);
 
 		/*
 		 * Execute the appropriate amcheck command for this relation using our
@@ -727,7 +753,7 @@ main(int argc, char *argv[])
 			{
 				if (opts.show_progress && progress_since_last_stderr)
 					fprintf(stderr, "\n");
-				pg_log_info("checking heap table \"%s\".\"%s\".\"%s\"",
+				pg_log_info("checking heap table \"%s.%s.%s\"",
 							rel->datinfo->datname, rel->nspname, rel->relname);
 				progress_since_last_stderr = false;
 			}
@@ -743,7 +769,7 @@ main(int argc, char *argv[])
 				if (opts.show_progress && progress_since_last_stderr)
 					fprintf(stderr, "\n");
 
-				pg_log_info("checking btree index \"%s\".\"%s\".\"%s\"",
+				pg_log_info("checking btree index \"%s.%s.%s\"",
 							rel->datinfo->datname, rel->nspname, rel->relname);
 				progress_since_last_stderr = false;
 			}
@@ -790,6 +816,9 @@ main(int argc, char *argv[])
  * names matching the expectations of verify_heap_slot_handler, which will
  * receive and handle each row returned from the verify_heapam() function.
  *
+ * The constructed SQL command will silently skip temporary tables, as checking
+ * them would needlessly draw errors from the underlying amcheck function.
+ *
  * sql: buffer into which the heap table checking command will be written
  * rel: relation information for the heap table to be checked
  * conn: the connection to be used, for string escaping purposes
@@ -799,10 +828,10 @@ prepare_heap_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
 {
 	resetPQExpBuffer(sql);
 	appendPQExpBuffer(sql,
-					  "SELECT blkno, offnum, attnum, msg FROM %s.verify_heapam("
-					  "\nrelation := %u, on_error_stop := %s, check_toast := %s, skip := '%s'",
+					  "SELECT v.blkno, v.offnum, v.attnum, v.msg "
+					  "FROM pg_catalog.pg_class c, %s.verify_heapam("
+					  "\nrelation := c.oid, on_error_stop := %s, check_toast := %s, skip := '%s'",
 					  rel->datinfo->amcheck_schema,
-					  rel->reloid,
 					  opts.on_error_stop ? "true" : "false",
 					  opts.reconcile_toast ? "true" : "false",
 					  opts.skip);
@@ -812,7 +841,10 @@ prepare_heap_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
 	if (opts.endblock >= 0)
 		appendPQExpBuffer(sql, ", endblock := " INT64_FORMAT, opts.endblock);
 
-	appendPQExpBuffer(sql, ")");
+	appendPQExpBuffer(sql,
+					  "\n) v WHERE c.oid = %u "
+					  "AND c.relpersistence != 't'",
+					  rel->reloid);
 }
 
 /*
@@ -823,6 +855,10 @@ prepare_heap_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
  * functions do not return any, but rather return corruption information by
  * raising errors, which verify_btree_slot_handler expects.
  *
+ * The constructed SQL command will silently skip temporary indexes, and
+ * indexes being reindexed concurrently, as checking them would needlessly draw
+ * errors from the underlying amcheck functions.
+ *
  * sql: buffer into which the heap table checking command will be written
  * rel: relation information for the index to be checked
  * conn: the connection to be used, for string escaping purposes
@@ -832,27 +868,31 @@ prepare_btree_command(PQExpBuffer sql, RelationInfo *rel, PGconn *conn)
 {
 	resetPQExpBuffer(sql);
 
-	/*
-	 * Embed the database, schema, and relation name in the query, so if the
-	 * check throws an error, the user knows which relation the error came
-	 * from.
-	 */
 	if (opts.parent_check)
 		appendPQExpBuffer(sql,
-						  "SELECT * FROM %s.bt_index_parent_check("
-						  "index := '%u'::regclass, heapallindexed := %s, "
-						  "rootdescend := %s)",
+						  "SELECT %s.bt_index_parent_check("
+						  "index := c.oid, heapallindexed := %s, rootdescend := %s)"
+						  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_index i "
+						  "WHERE c.oid = %u "
+						  "AND c.oid = i.indexrelid "
+						  "AND c.relpersistence != 't' "
+						  "AND i.indisready AND i.indisvalid AND i.indislive",
 						  rel->datinfo->amcheck_schema,
-						  rel->reloid,
 						  (opts.heapallindexed ? "true" : "false"),
-						  (opts.rootdescend ? "true" : "false"));
+						  (opts.rootdescend ? "true" : "false"),
+						  rel->reloid);
 	else
 		appendPQExpBuffer(sql,
-						  "SELECT * FROM %s.bt_index_check("
-						  "index := '%u'::regclass, heapallindexed := %s)",
+						  "SELECT %s.bt_index_check("
+						  "index := c.oid, heapallindexed := %s)"
+						  "\nFROM pg_catalog.pg_class c, pg_catalog.pg_index i "
+						  "WHERE c.oid = %u "
+						  "AND c.oid = i.indexrelid "
+						  "AND c.relpersistence != 't' "
+						  "AND i.indisready AND i.indisvalid AND i.indislive",
 						  rel->datinfo->amcheck_schema,
-						  rel->reloid,
-						  (opts.heapallindexed ? "true" : "false"));
+						  (opts.heapallindexed ? "true" : "false"),
+						  rel->reloid);
 }
 
 /*
@@ -996,29 +1036,28 @@ verify_heap_slot_handler(PGresult *res, PGconn *conn, void *context)
 				msg = PQgetvalue(res, i, 3);
 
 			if (!PQgetisnull(res, i, 2))
-				printf("heap table \"%s\".\"%s\".\"%s\", block %s, offset %s, attribute %s:\n    %s\n",
+				printf(_("heap table \"%s.%s.%s\", block %s, offset %s, attribute %s:\n"),
 					   rel->datinfo->datname, rel->nspname, rel->relname,
 					   PQgetvalue(res, i, 0),	/* blkno */
 					   PQgetvalue(res, i, 1),	/* offnum */
-					   PQgetvalue(res, i, 2),	/* attnum */
-					   msg);
+					   PQgetvalue(res, i, 2));	/* attnum */
 
 			else if (!PQgetisnull(res, i, 1))
-				printf("heap table \"%s\".\"%s\".\"%s\", block %s, offset %s:\n    %s\n",
+				printf(_("heap table \"%s.%s.%s\", block %s, offset %s:\n"),
 					   rel->datinfo->datname, rel->nspname, rel->relname,
 					   PQgetvalue(res, i, 0),	/* blkno */
-					   PQgetvalue(res, i, 1),	/* offnum */
-					   msg);
+					   PQgetvalue(res, i, 1));	/* offnum */
 
 			else if (!PQgetisnull(res, i, 0))
-				printf("heap table \"%s\".\"%s\".\"%s\", block %s:\n    %s\n",
+				printf(_("heap table \"%s.%s.%s\", block %s:\n"),
 					   rel->datinfo->datname, rel->nspname, rel->relname,
-					   PQgetvalue(res, i, 0),	/* blkno */
-					   msg);
+					   PQgetvalue(res, i, 0));	/* blkno */
 
 			else
-				printf("heap table \"%s\".\"%s\".\"%s\":\n    %s\n",
-					   rel->datinfo->datname, rel->nspname, rel->relname, msg);
+				printf(_("heap table \"%s.%s.%s\":\n"),
+					   rel->datinfo->datname, rel->nspname, rel->relname);
+
+			printf("    %s\n", msg);
 		}
 	}
 	else if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -1026,10 +1065,11 @@ verify_heap_slot_handler(PGresult *res, PGconn *conn, void *context)
 		char	   *msg = indent_lines(PQerrorMessage(conn));
 
 		all_checks_pass = false;
-		printf("heap table \"%s\".\"%s\".\"%s\":\n%s",
-			   rel->datinfo->datname, rel->nspname, rel->relname, msg);
+		printf(_("heap table \"%s.%s.%s\":\n"),
+			   rel->datinfo->datname, rel->nspname, rel->relname);
+		printf("%s", msg);
 		if (opts.verbose)
-			printf("query was: %s\n", rel->sql);
+			printf(_("query was: %s\n"), rel->sql);
 		FREE_AND_SET_NULL(msg);
 	}
 
@@ -1060,15 +1100,17 @@ verify_btree_slot_handler(PGresult *res, PGconn *conn, void *context)
 
 	if (PQresultStatus(res) == PGRES_TUPLES_OK)
 	{
-		int			ntups = PQntuples(res);
+		int                     ntups = PQntuples(res);
 
-		if (ntups != 1)
+		if (ntups > 1)
 		{
 			/*
 			 * We expect the btree checking functions to return one void row
-			 * each, so we should output some sort of warning if we get
-			 * anything else, not because it indicates corruption, but because
-			 * it suggests a mismatch between amcheck and pg_amcheck versions.
+			 * each, or zero rows if the check was skipped due to the object
+			 * being in the wrong state to be checked, so we should output some
+			 * sort of warning if we get anything more, not because it
+			 * indicates corruption, but because it suggests a mismatch between
+			 * amcheck and pg_amcheck versions.
 			 *
 			 * In conjunction with --progress, anything written to stderr at
 			 * this time would present strangely to the user without an extra
@@ -1078,11 +1120,11 @@ verify_btree_slot_handler(PGresult *res, PGconn *conn, void *context)
 			 */
 			if (opts.show_progress && progress_since_last_stderr)
 				fprintf(stderr, "\n");
-			pg_log_warning("btree index \"%s\".\"%s\".\"%s\": btree checking function returned unexpected number of rows: %d",
+			pg_log_warning("btree index \"%s.%s.%s\": btree checking function returned unexpected number of rows: %d",
 						   rel->datinfo->datname, rel->nspname, rel->relname, ntups);
 			if (opts.verbose)
 				pg_log_info("query was: %s", rel->sql);
-			pg_log_warning("are %s's and amcheck's versions compatible?",
+			pg_log_warning("Are %s's and amcheck's versions compatible?",
 						   progname);
 			progress_since_last_stderr = false;
 		}
@@ -1092,10 +1134,11 @@ verify_btree_slot_handler(PGresult *res, PGconn *conn, void *context)
 		char	   *msg = indent_lines(PQerrorMessage(conn));
 
 		all_checks_pass = false;
-		printf("btree index \"%s\".\"%s\".\"%s\":\n%s",
-			   rel->datinfo->datname, rel->nspname, rel->relname, msg);
+		printf(_("btree index \"%s.%s.%s\":\n"),
+			   rel->datinfo->datname, rel->nspname, rel->relname);
+		printf("%s", msg);
 		if (opts.verbose)
-			printf("query was: %s\n", rel->sql);
+			printf(_("query was: %s\n"), rel->sql);
 		FREE_AND_SET_NULL(msg);
 	}
 
@@ -1116,52 +1159,52 @@ verify_btree_slot_handler(PGresult *res, PGconn *conn, void *context)
 static void
 help(const char *progname)
 {
-	printf("%s uses amcheck module to check objects in a PostgreSQL database for corruption.\n\n", progname);
-	printf("Usage:\n");
-	printf("  %s [OPTION]... [DBNAME]\n", progname);
-	printf("\nTarget Options:\n");
-	printf("  -a, --all                      check all databases\n");
-	printf("  -d, --database=PATTERN         check matching database(s)\n");
-	printf("  -D, --exclude-database=PATTERN do NOT check matching database(s)\n");
-	printf("  -i, --index=PATTERN            check matching index(es)\n");
-	printf("  -I, --exclude-index=PATTERN    do NOT check matching index(es)\n");
-	printf("  -r, --relation=PATTERN         check matching relation(s)\n");
-	printf("  -R, --exclude-relation=PATTERN do NOT check matching relation(s)\n");
-	printf("  -s, --schema=PATTERN           check matching schema(s)\n");
-	printf("  -S, --exclude-schema=PATTERN   do NOT check matching schema(s)\n");
-	printf("  -t, --table=PATTERN            check matching table(s)\n");
-	printf("  -T, --exclude-table=PATTERN    do NOT check matching table(s)\n");
-	printf("      --no-dependent-indexes     do NOT expand list of relations to include indexes\n");
-	printf("      --no-dependent-toast       do NOT expand list of relations to include toast\n");
-	printf("      --no-strict-names          do NOT require patterns to match objects\n");
-	printf("\nTable Checking Options:\n");
-	printf("      --exclude-toast-pointers   do NOT follow relation toast pointers\n");
-	printf("      --on-error-stop            stop checking at end of first corrupt page\n");
-	printf("      --skip=OPTION              do NOT check \"all-frozen\" or \"all-visible\" blocks\n");
-	printf("      --startblock=BLOCK         begin checking table(s) at the given block number\n");
-	printf("      --endblock=BLOCK           check table(s) only up to the given block number\n");
-	printf("\nBtree Index Checking Options:\n");
-	printf("      --heapallindexed           check all heap tuples are found within indexes\n");
-	printf("      --parent-check             check index parent/child relationships\n");
-	printf("      --rootdescend              search from root page to refind tuples\n");
-	printf("\nConnection options:\n");
-	printf("  -h, --host=HOSTNAME            database server host or socket directory\n");
-	printf("  -p, --port=PORT                database server port\n");
-	printf("  -U, --username=USERNAME        user name to connect as\n");
-	printf("  -w, --no-password              never prompt for password\n");
-	printf("  -W, --password                 force password prompt\n");
-	printf("      --maintenance-db=DBNAME    alternate maintenance database\n");
-	printf("\nOther Options:\n");
-	printf("  -e, --echo                     show the commands being sent to the server\n");
-	printf("  -j, --jobs=NUM                 use this many concurrent connections to the server\n");
-	printf("  -q, --quiet                    don't write any messages\n");
-	printf("  -v, --verbose                  write a lot of output\n");
-	printf("  -V, --version                  output version information, then exit\n");
-	printf("  -P, --progress                 show progress information\n");
-	printf("  -?, --help                     show this help, then exit\n");
+	printf(_("%s checks objects in a PostgreSQL database for corruption.\n\n"), progname);
+	printf(_("Usage:\n"));
+	printf(_("  %s [OPTION]... [DBNAME]\n"), progname);
+	printf(_("\nTarget options:\n"));
+	printf(_("  -a, --all                       check all databases\n"));
+	printf(_("  -d, --database=PATTERN          check matching database(s)\n"));
+	printf(_("  -D, --exclude-database=PATTERN  do NOT check matching database(s)\n"));
+	printf(_("  -i, --index=PATTERN             check matching index(es)\n"));
+	printf(_("  -I, --exclude-index=PATTERN     do NOT check matching index(es)\n"));
+	printf(_("  -r, --relation=PATTERN          check matching relation(s)\n"));
+	printf(_("  -R, --exclude-relation=PATTERN  do NOT check matching relation(s)\n"));
+	printf(_("  -s, --schema=PATTERN            check matching schema(s)\n"));
+	printf(_("  -S, --exclude-schema=PATTERN    do NOT check matching schema(s)\n"));
+	printf(_("  -t, --table=PATTERN             check matching table(s)\n"));
+	printf(_("  -T, --exclude-table=PATTERN     do NOT check matching table(s)\n"));
+	printf(_("      --no-dependent-indexes      do NOT expand list of relations to include indexes\n"));
+	printf(_("      --no-dependent-toast        do NOT expand list of relations to include TOAST tables\n"));
+	printf(_("      --no-strict-names           do NOT require patterns to match objects\n"));
+	printf(_("\nTable checking options:\n"));
+	printf(_("      --exclude-toast-pointers    do NOT follow relation TOAST pointers\n"));
+	printf(_("      --on-error-stop             stop checking at end of first corrupt page\n"));
+	printf(_("      --skip=OPTION               do NOT check \"all-frozen\" or \"all-visible\" blocks\n"));
+	printf(_("      --startblock=BLOCK          begin checking table(s) at the given block number\n"));
+	printf(_("      --endblock=BLOCK            check table(s) only up to the given block number\n"));
+	printf(_("\nB-tree index checking options:\n"));
+	printf(_("      --heapallindexed            check that all heap tuples are found within indexes\n"));
+	printf(_("      --parent-check              check index parent/child relationships\n"));
+	printf(_("      --rootdescend               search from root page to refind tuples\n"));
+	printf(_("\nConnection options:\n"));
+	printf(_("  -h, --host=HOSTNAME             database server host or socket directory\n"));
+	printf(_("  -p, --port=PORT                 database server port\n"));
+	printf(_("  -U, --username=USERNAME         user name to connect as\n"));
+	printf(_("  -w, --no-password               never prompt for password\n"));
+	printf(_("  -W, --password                  force password prompt\n"));
+	printf(_("      --maintenance-db=DBNAME     alternate maintenance database\n"));
+	printf(_("\nOther options:\n"));
+	printf(_("  -e, --echo                      show the commands being sent to the server\n"));
+	printf(_("  -j, --jobs=NUM                  use this many concurrent connections to the server\n"));
+	printf(_("  -P, --progress                  show progress information\n"));
+	printf(_("  -v, --verbose                   write a lot of output\n"));
+	printf(_("  -V, --version                   output version information, then exit\n"));
+	printf(_("      --install-missing           install missing extensions\n"));
+	printf(_("  -?, --help                      show this help, then exit\n"));
 
-	printf("\nReport bugs to <%s>.\n", PACKAGE_BUGREPORT);
-	printf("%s home page: <%s>\n", PACKAGE_NAME, PACKAGE_URL);
+	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);
+	printf(_("%s home page: <%s>\n"), PACKAGE_NAME, PACKAGE_URL);
 }
 
 /*
@@ -1199,15 +1242,10 @@ progress_report(uint64 relations_total, uint64 relations_checked,
 	if (relpages_total)
 		percent_pages = (int) (relpages_checked * 100 / relpages_total);
 
-	/*
-	 * Separate step to keep platform-dependent format code out of fprintf
-	 * calls.  We only test for INT64_FORMAT availability in snprintf, not
-	 * fprintf.
-	 */
-	snprintf(checked_rel, sizeof(checked_rel), INT64_FORMAT, relations_checked);
-	snprintf(total_rel, sizeof(total_rel), INT64_FORMAT, relations_total);
-	snprintf(checked_pages, sizeof(checked_pages), INT64_FORMAT, relpages_checked);
-	snprintf(total_pages, sizeof(total_pages), INT64_FORMAT, relpages_total);
+	snprintf(checked_rel, sizeof(checked_rel), UINT64_FORMAT, relations_checked);
+	snprintf(total_rel, sizeof(total_rel), UINT64_FORMAT, relations_total);
+	snprintf(checked_pages, sizeof(checked_pages), UINT64_FORMAT, relpages_checked);
+	snprintf(total_pages, sizeof(total_pages), UINT64_FORMAT, relpages_total);
 
 #define VERBOSE_DATNAME_LENGTH 35
 	if (opts.verbose)
@@ -1219,7 +1257,7 @@ progress_report(uint64 relations_total, uint64 relations_checked,
 			 * last call)
 			 */
 			fprintf(stderr,
-					"%*s/%s relations (%d%%) %*s/%s pages (%d%%) %*s",
+					_("%*s/%s relations (%d%%), %*s/%s pages (%d%%) %*s"),
 					(int) strlen(total_rel),
 					checked_rel, total_rel, percent_rel,
 					(int) strlen(total_pages),
@@ -1230,7 +1268,7 @@ progress_report(uint64 relations_total, uint64 relations_checked,
 			bool		truncate = (strlen(datname) > VERBOSE_DATNAME_LENGTH);
 
 			fprintf(stderr,
-					"%*s/%s relations (%d%%) %*s/%s pages (%d%%), (%s%-*.*s)",
+					_("%*s/%s relations (%d%%), %*s/%s pages (%d%%) (%s%-*.*s)"),
 					(int) strlen(total_rel),
 					checked_rel, total_rel, percent_rel,
 					(int) strlen(total_pages),
@@ -1245,7 +1283,7 @@ progress_report(uint64 relations_total, uint64 relations_checked,
 	}
 	else
 		fprintf(stderr,
-				"%*s/%s relations (%d%%) %*s/%s pages (%d%%)",
+				_("%*s/%s relations (%d%%), %*s/%s pages (%d%%)"),
 				(int) strlen(total_rel),
 				checked_rel, total_rel, percent_rel,
 				(int) strlen(total_pages),
@@ -1514,7 +1552,7 @@ compile_database_list(PGconn *conn, SimplePtrList *databases,
 
 		/* This database is included.  Add to list */
 		if (opts.verbose)
-			pg_log_info("including database: \"%s\"", initial_dbname);
+			pg_log_info("including database \"%s\"", initial_dbname);
 
 		dat->datname = pstrdup(initial_dbname);
 		simple_ptr_list_append(databases, dat);
@@ -1656,7 +1694,7 @@ compile_database_list(PGconn *conn, SimplePtrList *databases,
 
 			/* This database is included.  Add to list */
 			if (opts.verbose)
-				pg_log_info("including database: \"%s\"", datname);
+				pg_log_info("including database \"%s\"", datname);
 
 			dat = (DatabaseInfo *) pg_malloc0(sizeof(DatabaseInfo));
 			dat->datname = pstrdup(datname);
@@ -1867,10 +1905,16 @@ compile_relation_list_one_db(PGconn *conn, SimplePtrList *relations,
 						  "\nAND (c.relam = %u OR NOT ep.btree_only OR ep.rel_regex IS NULL)",
 						  HEAP_TABLE_AM_OID, BTREE_AM_OID);
 
+	/*
+	 * Exclude temporary tables and indexes, which must necessarily belong to
+	 * other sessions.  (We don't create any ourselves.)  We must ultimately
+	 * exclude indexes marked invalid or not ready, but we delay that decision
+	 * until firing off the amcheck command, as the state of an index may
+	 * change by then.
+	 */
+	appendPQExpBufferStr(&sql, "\nWHERE c.relpersistence != 't'");
 	if (opts.excludetbl || opts.excludeidx || opts.excludensp)
-		appendPQExpBufferStr(&sql, "\nWHERE ep.pattern_id IS NULL");
-	else
-		appendPQExpBufferStr(&sql, "\nWHERE true");
+		appendPQExpBufferStr(&sql, "\nAND ep.pattern_id IS NULL");
 
 	/*
 	 * We need to be careful not to break the --no-dependent-toast and
@@ -1888,14 +1932,14 @@ compile_relation_list_one_db(PGconn *conn, SimplePtrList *relations,
 	if (opts.allrel)
 		appendPQExpBuffer(&sql,
 						  " AND c.relam = %u "
-						  "AND c.relkind IN ('r', 'm', 't') "
+						  "AND c.relkind IN ('r', 'S', 'm', 't') "
 						  "AND c.relnamespace != %u",
 						  HEAP_TABLE_AM_OID, PG_TOAST_NAMESPACE);
 	else
 		appendPQExpBuffer(&sql,
 						  " AND c.relam IN (%u, %u)"
-						  "AND c.relkind IN ('r', 'm', 't', 'i') "
-						  "AND ((c.relam = %u AND c.relkind IN ('r', 'm', 't')) OR "
+						  "AND c.relkind IN ('r', 'S', 'm', 't', 'i') "
+						  "AND ((c.relam = %u AND c.relkind IN ('r', 'S', 'm', 't')) OR "
 						  "(c.relam = %u AND c.relkind = 'i'))",
 						  HEAP_TABLE_AM_OID, BTREE_AM_OID,
 						  HEAP_TABLE_AM_OID, BTREE_AM_OID);
@@ -1922,7 +1966,8 @@ compile_relation_list_one_db(PGconn *conn, SimplePtrList *relations,
 								 "\nON ('pg_toast' ~ ep.nsp_regex OR ep.nsp_regex IS NULL)"
 								 "\nAND (t.relname ~ ep.rel_regex OR ep.rel_regex IS NULL)"
 								 "\nAND ep.heap_only"
-								 "\nWHERE ep.pattern_id IS NULL");
+								 "\nWHERE ep.pattern_id IS NULL"
+								 "\nAND t.relpersistence != 't'");
 		appendPQExpBufferStr(&sql,
 							 "\n)");
 	}
@@ -1940,7 +1985,8 @@ compile_relation_list_one_db(PGconn *conn, SimplePtrList *relations,
 						  "\nINNER JOIN pg_catalog.pg_index i "
 						  "ON r.oid = i.indrelid "
 						  "INNER JOIN pg_catalog.pg_class c "
-						  "ON i.indexrelid = c.oid");
+						  "ON i.indexrelid = c.oid "
+						  "AND c.relpersistence != 't'");
 		if (opts.excludeidx || opts.excludensp)
 			appendPQExpBufferStr(&sql,
 								 "\nINNER JOIN pg_catalog.pg_namespace n "
@@ -1978,7 +2024,8 @@ compile_relation_list_one_db(PGconn *conn, SimplePtrList *relations,
 						  "INNER JOIN pg_catalog.pg_index i "
 						  "ON t.oid = i.indrelid"
 						  "\nINNER JOIN pg_catalog.pg_class c "
-						  "ON i.indexrelid = c.oid");
+						  "ON i.indexrelid = c.oid "
+						  "AND c.relpersistence != 't'");
 		if (opts.excludeidx)
 			appendPQExpBufferStr(&sql,
 								 "\nLEFT OUTER JOIN exclude_pat ep "

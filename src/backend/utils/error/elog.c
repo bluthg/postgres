@@ -2714,6 +2714,14 @@ log_line_prefix(StringInfo buf, ErrorData *edata)
 				else
 					appendStringInfoString(buf, unpack_sql_state(edata->sqlerrcode));
 				break;
+			case 'Q':
+				if (padding != 0)
+					appendStringInfo(buf, "%*lld", padding,
+									 (long long) pgstat_get_my_query_id());
+				else
+					appendStringInfo(buf, "%lld",
+									 (long long) pgstat_get_my_query_id());
+				break;
 			default:
 				/* format error - ignore it */
 				break;
@@ -2956,6 +2964,10 @@ write_csvlog(ErrorData *edata)
 		if (leader && leader->pid != MyProcPid)
 			appendStringInfo(&buf, "%d", leader->pid);
 	}
+	appendStringInfoChar(&buf, ',');
+
+	/* query id */
+	appendStringInfo(&buf, "%lld", (long long) pgstat_get_my_query_id());
 
 	appendStringInfoChar(&buf, '\n');
 
@@ -2996,6 +3008,7 @@ static void
 send_message_to_server_log(ErrorData *edata)
 {
 	StringInfoData buf;
+	bool		fallback_to_stderr = false;
 
 	initStringInfo(&buf);
 
@@ -3147,8 +3160,27 @@ send_message_to_server_log(ErrorData *edata)
 	}
 #endif							/* WIN32 */
 
-	/* Write to stderr, if enabled */
-	if ((Log_destination & LOG_DESTINATION_STDERR) || whereToSendOutput == DestDebug)
+	/* Write to csvlog, if enabled */
+	if (Log_destination & LOG_DESTINATION_CSVLOG)
+	{
+		/*
+		 * Send CSV data if it's safe to do so (syslogger doesn't need the
+		 * pipe).  If this is not possible, fallback to an entry written to
+		 * stderr.
+		 */
+		if (redirection_done || MyBackendType == B_LOGGER)
+			write_csvlog(edata);
+		else
+			fallback_to_stderr = true;
+	}
+
+	/*
+	 * Write to stderr, if enabled or if required because of a previous
+	 * limitation.
+	 */
+	if ((Log_destination & LOG_DESTINATION_STDERR) ||
+		whereToSendOutput == DestDebug ||
+		fallback_to_stderr)
 	{
 		/*
 		 * Use the chunking protocol if we know the syslogger should be
@@ -3177,34 +3209,8 @@ send_message_to_server_log(ErrorData *edata)
 	if (MyBackendType == B_LOGGER)
 		write_syslogger_file(buf.data, buf.len, LOG_DESTINATION_STDERR);
 
-	/* Write to CSV log if enabled */
-	if (Log_destination & LOG_DESTINATION_CSVLOG)
-	{
-		if (redirection_done || MyBackendType == B_LOGGER)
-		{
-			/*
-			 * send CSV data if it's safe to do so (syslogger doesn't need the
-			 * pipe). First get back the space in the message buffer.
-			 */
-			pfree(buf.data);
-			write_csvlog(edata);
-		}
-		else
-		{
-			/*
-			 * syslogger not up (yet), so just dump the message to stderr,
-			 * unless we already did so above.
-			 */
-			if (!(Log_destination & LOG_DESTINATION_STDERR) &&
-				whereToSendOutput != DestDebug)
-				write_console(buf.data, buf.len);
-			pfree(buf.data);
-		}
-	}
-	else
-	{
-		pfree(buf.data);
-	}
+	/* No more need of the message formatted for stderr */
+	pfree(buf.data);
 }
 
 /*
@@ -3238,11 +3244,16 @@ write_pipe_chunks(char *data, int len, int dest)
 
 	p.proto.nuls[0] = p.proto.nuls[1] = '\0';
 	p.proto.pid = MyProcPid;
+	p.proto.flags = 0;
+	if (dest == LOG_DESTINATION_STDERR)
+		p.proto.flags |= PIPE_PROTO_DEST_STDERR;
+	else if (dest == LOG_DESTINATION_CSVLOG)
+		p.proto.flags |= PIPE_PROTO_DEST_CSVLOG;
 
 	/* write all but the last chunk */
 	while (len > PIPE_MAX_PAYLOAD)
 	{
-		p.proto.is_last = (dest == LOG_DESTINATION_CSVLOG ? 'F' : 'f');
+		/* no need to set PIPE_PROTO_IS_LAST yet */
 		p.proto.len = PIPE_MAX_PAYLOAD;
 		memcpy(p.proto.data, data, PIPE_MAX_PAYLOAD);
 		rc = write(fd, &p, PIPE_HEADER_SIZE + PIPE_MAX_PAYLOAD);
@@ -3252,7 +3263,7 @@ write_pipe_chunks(char *data, int len, int dest)
 	}
 
 	/* write the last chunk */
-	p.proto.is_last = (dest == LOG_DESTINATION_CSVLOG ? 'T' : 't');
+	p.proto.flags |= PIPE_PROTO_IS_LAST;
 	p.proto.len = len;
 	memcpy(p.proto.data, data, len);
 	rc = write(fd, &p, PIPE_HEADER_SIZE + len);
@@ -3300,8 +3311,6 @@ send_message_to_frontend(ErrorData *edata)
 		/* New style with separate fields */
 		const char *sev;
 		char		tbuf[12];
-		int			ssval;
-		int			i;
 
 		/* 'N' (Notice) is for nonfatal conditions, 'E' is for errors */
 		pq_beginmessage(&msgbuf, (edata->elevel < ERROR) ? 'N' : 'E');
@@ -3312,17 +3321,8 @@ send_message_to_frontend(ErrorData *edata)
 		pq_sendbyte(&msgbuf, PG_DIAG_SEVERITY_NONLOCALIZED);
 		err_sendstring(&msgbuf, sev);
 
-		/* unpack MAKE_SQLSTATE code */
-		ssval = edata->sqlerrcode;
-		for (i = 0; i < 5; i++)
-		{
-			tbuf[i] = PGUNSIXBIT(ssval);
-			ssval >>= 6;
-		}
-		tbuf[i] = '\0';
-
 		pq_sendbyte(&msgbuf, PG_DIAG_SQLSTATE);
-		err_sendstring(&msgbuf, tbuf);
+		err_sendstring(&msgbuf, unpack_sql_state(edata->sqlerrcode));
 
 		/* M field is required per protocol, so always send something */
 		pq_sendbyte(&msgbuf, PG_DIAG_MESSAGE_PRIMARY);

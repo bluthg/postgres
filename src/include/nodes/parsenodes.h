@@ -140,6 +140,8 @@ typedef struct Query
 	bool		hasForUpdate;	/* FOR [KEY] UPDATE/SHARE was specified */
 	bool		hasRowSecurity; /* rewriter has applied some RLS policy */
 
+	bool		isReturn;		/* is a RETURN statement */
+
 	List	   *cteList;		/* WITH list (of CommonTableExpr's) */
 
 	List	   *rtable;			/* list of range table entries */
@@ -216,7 +218,7 @@ typedef struct Query
 typedef struct TypeName
 {
 	NodeTag		type;
-	List	   *names;			/* qualified name (list of Value strings) */
+	List	   *names;			/* qualified name (list of String nodes) */
 	Oid			typeOid;		/* type identified by OID */
 	bool		setof;			/* is a set? */
 	bool		pct_type;		/* %TYPE specified? */
@@ -229,7 +231,7 @@ typedef struct TypeName
 /*
  * ColumnRef - specifies a reference to a column, or possibly a whole tuple
  *
- * The "fields" list must be nonempty.  It can contain string Value nodes
+ * The "fields" list must be nonempty.  It can contain String nodes
  * (representing names) and A_Star nodes (representing occurrence of a '*').
  * Currently, A_Star must appear only as the last list element --- the grammar
  * is responsible for enforcing this!
@@ -242,7 +244,7 @@ typedef struct TypeName
 typedef struct ColumnRef
 {
 	NodeTag		type;
-	List	   *fields;			/* field names (Value strings) or A_Star */
+	List	   *fields;			/* field names (String nodes) or A_Star */
 	int			location;		/* token location, or -1 if unknown */
 } ColumnRef;
 
@@ -293,7 +295,19 @@ typedef struct A_Expr
 typedef struct A_Const
 {
 	NodeTag		type;
-	Value		val;			/* value (includes type info, see value.h) */
+	/*
+	 * Value nodes are inline for performance.  You can treat 'val' as a node,
+	 * as in IsA(&val, Integer).  'val' is not valid if isnull is true.
+	 */
+	union ValUnion
+	{
+		Node		node;
+		Integer		ival;
+		Float		fval;
+		String		sval;
+		BitString	bsval;
+	}			val;
+	bool		isnull;			/* SQL NULL constant */
 	int			location;		/* token location, or -1 if unknown */
 } A_Const;
 
@@ -398,7 +412,7 @@ typedef struct A_Indices
  * A_Indirection - select a field and/or array element from an expression
  *
  * The indirection list can contain A_Indices nodes (representing
- * subscripting), string Value nodes (representing field selection --- the
+ * subscripting), String nodes (representing field selection --- the
  * string value is the name of the field to select), and A_Star nodes
  * (representing selection of all fields of a composite type).
  * For example, a complex selection operation like
@@ -688,14 +702,14 @@ typedef struct TableLikeClause
 typedef enum TableLikeOption
 {
 	CREATE_TABLE_LIKE_COMMENTS = 1 << 0,
-	CREATE_TABLE_LIKE_CONSTRAINTS = 1 << 1,
-	CREATE_TABLE_LIKE_DEFAULTS = 1 << 2,
-	CREATE_TABLE_LIKE_GENERATED = 1 << 3,
-	CREATE_TABLE_LIKE_IDENTITY = 1 << 4,
-	CREATE_TABLE_LIKE_INDEXES = 1 << 5,
-	CREATE_TABLE_LIKE_STATISTICS = 1 << 6,
-	CREATE_TABLE_LIKE_STORAGE = 1 << 7,
-	CREATE_TABLE_LIKE_COMPRESSION = 1 << 8,
+	CREATE_TABLE_LIKE_COMPRESSION = 1 << 1,
+	CREATE_TABLE_LIKE_CONSTRAINTS = 1 << 2,
+	CREATE_TABLE_LIKE_DEFAULTS = 1 << 3,
+	CREATE_TABLE_LIKE_GENERATED = 1 << 4,
+	CREATE_TABLE_LIKE_IDENTITY = 1 << 5,
+	CREATE_TABLE_LIKE_INDEXES = 1 << 6,
+	CREATE_TABLE_LIKE_STATISTICS = 1 << 7,
+	CREATE_TABLE_LIKE_STORAGE = 1 << 8,
 	CREATE_TABLE_LIKE_ALL = PG_INT32_MAX
 } TableLikeOption;
 
@@ -742,7 +756,7 @@ typedef struct DefElem
 	NodeTag		type;
 	char	   *defnamespace;	/* NULL if unqualified name */
 	char	   *defname;
-	Node	   *arg;			/* a (Value *) or a (TypeName *) */
+	Node	   *arg;			/* typically Integer, Float, String, or TypeName */
 	DefElemAction defaction;	/* unspecified action, or SET/ADD/DROP */
 	int			location;		/* token location, or -1 if unknown */
 } DefElem;
@@ -927,10 +941,10 @@ typedef struct PartitionCmd
  *	  inFromCl marks those range variables that are listed in the FROM clause.
  *	  It's false for RTEs that are added to a query behind the scenes, such
  *	  as the NEW and OLD variables for a rule, or the subqueries of a UNION.
- *	  This flag is not used anymore during parsing, since the parser now uses
- *	  a separate "namespace" data structure to control visibility, but it is
- *	  needed by ruleutils.c to determine whether RTEs should be shown in
- *	  decompiled queries.
+ *	  This flag is not used during parsing (except in transformLockingClause,
+ *	  q.v.); the parser now uses a separate "namespace" data structure to
+ *	  control visibility.  But it is needed by ruleutils.c to determine
+ *	  whether RTEs should be shown in decompiled queries.
  *
  *	  requiredPerms and checkAsUser specify run-time access permissions
  *	  checks to be performed at query startup.  The user must have *all*
@@ -1130,7 +1144,7 @@ typedef struct RangeTblEntry
 	 * Fields valid for ENR RTEs (else NULL/zero):
 	 */
 	char	   *enrname;		/* name of ephemeral named relation */
-	double		enrtuples;		/* estimated or actual from caller */
+	Cardinality	enrtuples;		/* estimated or actual from caller */
 
 	/*
 	 * Fields valid in all RTEs:
@@ -1335,7 +1349,7 @@ typedef struct SortGroupClause
  *
  * SETS( SIMPLE(1,2), CUBE( SIMPLE(3), SIMPLE(4,5) ) )
  */
-typedef enum
+typedef enum GroupingSetKind
 {
 	GROUPING_SET_EMPTY,
 	GROUPING_SET_SIMPLE,
@@ -1721,6 +1735,16 @@ typedef struct SetOperationStmt
 } SetOperationStmt;
 
 
+/*
+ * RETURN statement (inside SQL function body)
+ */
+typedef struct ReturnStmt
+{
+	NodeTag		type;
+	Node	   *returnval;
+} ReturnStmt;
+
+
 /* ----------------------
  *		PL/pgSQL Assignment Statement
  *
@@ -1792,6 +1816,7 @@ typedef enum ObjectType
 	OBJECT_POLICY,
 	OBJECT_PROCEDURE,
 	OBJECT_PUBLICATION,
+	OBJECT_PUBLICATION_NAMESPACE,
 	OBJECT_PUBLICATION_REL,
 	OBJECT_ROLE,
 	OBJECT_ROUTINE,
@@ -1889,6 +1914,7 @@ typedef enum AlterTableType
 	AT_SetLogged,				/* SET LOGGED */
 	AT_SetUnLogged,				/* SET UNLOGGED */
 	AT_DropOids,				/* SET WITHOUT OIDS */
+	AT_SetAccessMethod,			/* SET ACCESS METHOD */
 	AT_SetTableSpace,			/* SET TABLESPACE */
 	AT_SetRelOptions,			/* SET (...) -- AM specific parameters */
 	AT_ResetRelOptions,			/* RESET (...) -- AM specific parameters */
@@ -1917,11 +1943,10 @@ typedef enum AlterTableType
 	AT_GenericOptions,			/* OPTIONS (...) */
 	AT_AttachPartition,			/* ATTACH PARTITION */
 	AT_DetachPartition,			/* DETACH PARTITION */
-	AT_DetachPartitionFinalize,	/* DETACH PARTITION FINALIZE */
+	AT_DetachPartitionFinalize, /* DETACH PARTITION FINALIZE */
 	AT_AddIdentity,				/* ADD IDENTITY */
 	AT_SetIdentity,				/* SET identity column options */
 	AT_DropIdentity,			/* DROP IDENTITY */
-	AT_AlterCollationRefreshVersion, /* ALTER COLLATION ... REFRESH VERSION */
 	AT_ReAddStatistics			/* internal to commands/tablecmds.c */
 } AlterTableType;
 
@@ -1938,7 +1963,6 @@ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
 	AlterTableType subtype;		/* Type of table alteration to apply */
 	char	   *name;			/* column, constraint, or trigger to act on,
 								 * or tablespace */
-	List	   *object;			/* collation to act on if it's a collation */
 	int16		num;			/* attribute number for columns referenced by
 								 * number */
 	RoleSpec   *newowner;
@@ -1947,6 +1971,17 @@ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
 	DropBehavior behavior;		/* RESTRICT or CASCADE for DROP cases */
 	bool		missing_ok;		/* skip error if missing? */
 } AlterTableCmd;
+
+
+/* ----------------------
+ * Alter Collation
+ * ----------------------
+ */
+typedef struct AlterCollationStmt
+{
+	NodeTag		type;
+	List	   *collname;
+} AlterCollationStmt;
 
 
 /* ----------------------
@@ -1993,7 +2028,7 @@ typedef struct GrantStmt
 	GrantTargetType targtype;	/* type of the grant target */
 	ObjectType	objtype;		/* kind of object being operated on */
 	List	   *objects;		/* list of RangeVar nodes, ObjectWithArgs
-								 * nodes, or plain names (as Value strings) */
+								 * nodes, or plain names (as String values) */
 	List	   *privileges;		/* list of AccessPriv nodes */
 	/* privileges == NIL denotes ALL PRIVILEGES */
 	List	   *grantees;		/* list of RoleSpec nodes */
@@ -2003,18 +2038,29 @@ typedef struct GrantStmt
 } GrantStmt;
 
 /*
- * Note: ObjectWithArgs carries only the types of the input parameters of the
- * function.  So it is sufficient to identify an existing function, but it
- * is not enough info to define a function nor to call it.
+ * ObjectWithArgs represents a function/procedure/operator name plus parameter
+ * identification.
+ *
+ * objargs includes only the types of the input parameters of the object.
+ * In some contexts, that will be all we have, and it's enough to look up
+ * objects according to the traditional Postgres rules (i.e., when only input
+ * arguments matter).
+ *
+ * objfuncargs, if not NIL, carries the full specification of the parameter
+ * list, including parameter mode annotations.
+ *
+ * Some grammar productions can set args_unspecified = true instead of
+ * providing parameter info.  In this case, lookup will succeed only if
+ * the object name is unique.  Note that otherwise, NIL parameter lists
+ * mean zero arguments.
  */
 typedef struct ObjectWithArgs
 {
 	NodeTag		type;
 	List	   *objname;		/* qualified name of function/operator */
-	List	   *objargs;		/* list of Typename nodes */
-	bool		args_unspecified;	/* argument list was omitted, so name must
-									 * be unique (note that objargs == NIL
-									 * means zero args) */
+	List	   *objargs;		/* list of Typename nodes (input args only) */
+	List	   *objfuncargs;	/* list of FunctionParameter nodes */
+	bool		args_unspecified;	/* argument list was omitted? */
 } ObjectWithArgs;
 
 /*
@@ -2028,7 +2074,7 @@ typedef struct AccessPriv
 {
 	NodeTag		type;
 	char	   *priv_name;		/* string name of privilege */
-	List	   *cols;			/* list of Value strings */
+	List	   *cols;			/* list of String */
 } AccessPriv;
 
 /* ----------------------
@@ -2037,7 +2083,7 @@ typedef struct AccessPriv
  * Note: because of the parsing ambiguity with the GRANT <privileges>
  * statement, granted_roles is a list of AccessPriv; the execution code
  * should complain if any column lists appear.  grantee_roles is a list
- * of role names, as Value strings.
+ * of role names, as String values.
  * ----------------------
  */
 typedef struct GrantRoleStmt
@@ -2092,7 +2138,7 @@ typedef struct CopyStmt
  * preserve the distinction in VariableSetKind for CreateCommandTag().
  * ----------------------
  */
-typedef enum
+typedef enum VariableSetKind
 {
 	VAR_SET_VALUE,				/* SET var = value */
 	VAR_SET_DEFAULT,			/* SET var TO DEFAULT */
@@ -2255,6 +2301,7 @@ typedef struct Constraint
 	char		fk_matchtype;	/* FULL, PARTIAL, SIMPLE */
 	char		fk_upd_action;	/* ON UPDATE action */
 	char		fk_del_action;	/* ON DELETE action */
+	List	   *fk_del_set_cols;	/* ON DELETE SET NULL/DEFAULT (col1, col2) */
 	List	   *old_conpfeqop;	/* pg_constraint.conpfeqop of my former self */
 	Oid			old_pktable_oid;	/* pg_constraint.confrelid of my former
 									 * self */
@@ -2498,7 +2545,7 @@ typedef struct CreateTrigStmt
 	char	   *trigname;		/* TRIGGER's name */
 	RangeVar   *relation;		/* relation trigger is on */
 	List	   *funcname;		/* qual. name of function to call */
-	List	   *args;			/* list of (T_String) Values or NIL */
+	List	   *args;			/* list of String or NIL */
 	bool		row;			/* ROW/STATEMENT */
 	/* timing uses the TRIGGER_TYPE bits defined in catalog/pg_trigger.h */
 	int16		timing;			/* BEFORE, AFTER, or INSTEAD */
@@ -2634,7 +2681,7 @@ typedef struct DefineStmt
 	NodeTag		type;
 	ObjectType	kind;			/* aggregate, operator, type */
 	bool		oldstyle;		/* hack to signal old CREATE AGG syntax */
-	List	   *defnames;		/* qualified name (list of Value strings) */
+	List	   *defnames;		/* qualified name (list of String) */
 	List	   *args;			/* a list of TypeName (if needed) */
 	List	   *definition;		/* a list of DefElem */
 	bool		if_not_exists;	/* just do nothing if it already exists? */
@@ -2648,7 +2695,7 @@ typedef struct DefineStmt
 typedef struct CreateDomainStmt
 {
 	NodeTag		type;
-	List	   *domainname;		/* qualified name (list of Value strings) */
+	List	   *domainname;		/* qualified name (list of String) */
 	TypeName   *typeName;		/* the base type */
 	CollateClause *collClause;	/* untransformed COLLATE spec, if any */
 	List	   *constraints;	/* constraints (list of Constraint nodes) */
@@ -2661,7 +2708,7 @@ typedef struct CreateDomainStmt
 typedef struct CreateOpClassStmt
 {
 	NodeTag		type;
-	List	   *opclassname;	/* qualified name (list of Value strings) */
+	List	   *opclassname;	/* qualified name (list of String) */
 	List	   *opfamilyname;	/* qualified name (ditto); NIL if omitted */
 	char	   *amname;			/* name of index AM opclass is for */
 	TypeName   *datatype;		/* datatype of indexed column */
@@ -2693,7 +2740,7 @@ typedef struct CreateOpClassItem
 typedef struct CreateOpFamilyStmt
 {
 	NodeTag		type;
-	List	   *opfamilyname;	/* qualified name (list of Value strings) */
+	List	   *opfamilyname;	/* qualified name (list of String) */
 	char	   *amname;			/* name of index AM opfamily is for */
 } CreateOpFamilyStmt;
 
@@ -2704,7 +2751,7 @@ typedef struct CreateOpFamilyStmt
 typedef struct AlterOpFamilyStmt
 {
 	NodeTag		type;
-	List	   *opfamilyname;	/* qualified name (list of Value strings) */
+	List	   *opfamilyname;	/* qualified name (list of String) */
 	char	   *amname;			/* name of index AM opfamily is for */
 	bool		isDrop;			/* ADD or DROP the items? */
 	List	   *items;			/* List of CreateOpClassItem nodes */
@@ -2774,7 +2821,8 @@ typedef struct SecLabelStmt
 #define CURSOR_OPT_SCROLL		0x0002	/* SCROLL explicitly given */
 #define CURSOR_OPT_NO_SCROLL	0x0004	/* NO SCROLL explicitly given */
 #define CURSOR_OPT_INSENSITIVE	0x0008	/* INSENSITIVE */
-#define CURSOR_OPT_HOLD			0x0010	/* WITH HOLD */
+#define CURSOR_OPT_ASENSITIVE	0x0010	/* ASENSITIVE */
+#define CURSOR_OPT_HOLD			0x0020	/* WITH HOLD */
 /* these planner-control flags do not correspond to any SQL grammar: */
 #define CURSOR_OPT_FAST_PLAN	0x0100	/* prefer fast-start plan */
 #define CURSOR_OPT_GENERIC_PLAN 0x0200	/* force use of generic plan */
@@ -2874,13 +2922,13 @@ typedef struct IndexStmt
 typedef struct CreateStatsStmt
 {
 	NodeTag		type;
-	List	   *defnames;		/* qualified name (list of Value strings) */
-	List	   *stat_types;		/* stat types (list of Value strings) */
+	List	   *defnames;		/* qualified name (list of String) */
+	List	   *stat_types;		/* stat types (list of String) */
 	List	   *exprs;			/* expressions to build statistics on */
 	List	   *relations;		/* rels to build stats on (list of RangeVar) */
 	char	   *stxcomment;		/* comment to apply to stats, or NULL */
-	bool		if_not_exists;	/* do nothing if stats name already exists */
 	bool		transformed;	/* true when transformStatsStmt is finished */
+	bool		if_not_exists;	/* do nothing if stats name already exists */
 } CreateStatsStmt;
 
 /*
@@ -2905,7 +2953,7 @@ typedef struct StatsElem
 typedef struct AlterStatsStmt
 {
 	NodeTag		type;
-	List	   *defnames;		/* qualified name (list of Value strings) */
+	List	   *defnames;		/* qualified name (list of String) */
 	int			stxstattarget;	/* statistics target */
 	bool		missing_ok;		/* skip error if statistics object is missing */
 } AlterStatsStmt;
@@ -2923,6 +2971,7 @@ typedef struct CreateFunctionStmt
 	List	   *parameters;		/* a list of FunctionParameter */
 	TypeName   *returnType;		/* the return type */
 	List	   *options;		/* a list of DefElem */
+	Node	   *sql_body;
 } CreateFunctionStmt;
 
 typedef enum FunctionParameterMode
@@ -2932,7 +2981,9 @@ typedef enum FunctionParameterMode
 	FUNC_PARAM_OUT = 'o',		/* output only */
 	FUNC_PARAM_INOUT = 'b',		/* both */
 	FUNC_PARAM_VARIADIC = 'v',	/* variadic (always input) */
-	FUNC_PARAM_TABLE = 't'		/* table function output column */
+	FUNC_PARAM_TABLE = 't',		/* table function output column */
+	/* this is not used in pg_proc: */
+	FUNC_PARAM_DEFAULT = 'd'	/* default; effectively same as IN */
 } FunctionParameterMode;
 
 typedef struct FunctionParameter
@@ -2975,13 +3026,19 @@ typedef struct InlineCodeBlock
 
 /* ----------------------
  *		CALL statement
+ *
+ * OUT-mode arguments are removed from the transformed funcexpr.  The outargs
+ * list contains copies of the expressions for all output arguments, in the
+ * order of the procedure's declared arguments.  (outargs is never evaluated,
+ * but is useful to the caller as a reference for what to assign to.)
  * ----------------------
  */
 typedef struct CallStmt
 {
 	NodeTag		type;
 	FuncCall   *funccall;		/* from the parser */
-	FuncExpr   *funcexpr;		/* transformed */
+	FuncExpr   *funcexpr;		/* transformed call, with only input args */
+	List	   *outargs;		/* transformed output-argument expressions */
 } CallStmt;
 
 typedef struct CallContext
@@ -3018,7 +3075,7 @@ typedef struct AlterObjectDependsStmt
 	ObjectType	objectType;		/* OBJECT_FUNCTION, OBJECT_TRIGGER, etc */
 	RangeVar   *relation;		/* in case a table is involved */
 	Node	   *object;			/* name of the object */
-	Value	   *extname;		/* extension name */
+	String	   *extname;		/* extension name */
 	bool		remove;			/* set true to remove dep rather than add */
 } AlterObjectDependsStmt;
 
@@ -3164,8 +3221,8 @@ typedef struct CompositeTypeStmt
 typedef struct CreateEnumStmt
 {
 	NodeTag		type;
-	List	   *typeName;		/* qualified name (list of Value strings) */
-	List	   *vals;			/* enum values (list of Value strings) */
+	List	   *typeName;		/* qualified name (list of String) */
+	List	   *vals;			/* enum values (list of String) */
 } CreateEnumStmt;
 
 /* ----------------------
@@ -3175,7 +3232,7 @@ typedef struct CreateEnumStmt
 typedef struct CreateRangeStmt
 {
 	NodeTag		type;
-	List	   *typeName;		/* qualified name (list of Value strings) */
+	List	   *typeName;		/* qualified name (list of String) */
 	List	   *params;			/* range parameters (list of DefElem) */
 } CreateRangeStmt;
 
@@ -3186,7 +3243,7 @@ typedef struct CreateRangeStmt
 typedef struct AlterEnumStmt
 {
 	NodeTag		type;
-	List	   *typeName;		/* qualified name (list of Value strings) */
+	List	   *typeName;		/* qualified name (list of String) */
 	char	   *oldVal;			/* old enum value's name, if renaming */
 	char	   *newVal;			/* new enum value's name */
 	char	   *newValNeighbor; /* neighboring enum value, if specified */
@@ -3548,7 +3605,7 @@ typedef struct ReassignOwnedStmt
 typedef struct AlterTSDictionaryStmt
 {
 	NodeTag		type;
-	List	   *dictname;		/* qualified name (list of Value strings) */
+	List	   *dictname;		/* qualified name (list of String) */
 	List	   *options;		/* List of DefElem nodes */
 } AlterTSDictionaryStmt;
 
@@ -3568,26 +3625,52 @@ typedef struct AlterTSConfigurationStmt
 {
 	NodeTag		type;
 	AlterTSConfigType kind;		/* ALTER_TSCONFIG_ADD_MAPPING, etc */
-	List	   *cfgname;		/* qualified name (list of Value strings) */
+	List	   *cfgname;		/* qualified name (list of String) */
 
 	/*
 	 * dicts will be non-NIL if ADD/ALTER MAPPING was specified. If dicts is
 	 * NIL, but tokentype isn't, DROP MAPPING was specified.
 	 */
-	List	   *tokentype;		/* list of Value strings */
-	List	   *dicts;			/* list of list of Value strings */
+	List	   *tokentype;		/* list of String */
+	List	   *dicts;			/* list of list of String */
 	bool		override;		/* if true - remove old variant */
 	bool		replace;		/* if true - replace dictionary by another */
 	bool		missing_ok;		/* for DROP - skip error if missing? */
 } AlterTSConfigurationStmt;
 
+typedef struct PublicationTable
+{
+	NodeTag		type;
+	RangeVar   *relation;		/* relation to be published */
+} PublicationTable;
+
+/*
+ * Publication object type
+ */
+typedef enum PublicationObjSpecType
+{
+	PUBLICATIONOBJ_TABLE,		/* Table type */
+	PUBLICATIONOBJ_TABLE_IN_SCHEMA, /* Tables in schema type */
+	PUBLICATIONOBJ_TABLE_IN_CUR_SCHEMA, /* Get the first element from
+										 * search_path */
+	PUBLICATIONOBJ_CONTINUATION /* Continuation of previous type */
+} PublicationObjSpecType;
+
+typedef struct PublicationObjSpec
+{
+	NodeTag		type;
+	PublicationObjSpecType pubobjtype;	/* type of this publication object */
+	char	   *name;
+	PublicationTable *pubtable;
+	int			location;		/* token location, or -1 if unknown */
+} PublicationObjSpec;
 
 typedef struct CreatePublicationStmt
 {
 	NodeTag		type;
 	char	   *pubname;		/* Name of the publication */
 	List	   *options;		/* List of DefElem nodes */
-	List	   *tables;			/* Optional list of tables to add */
+	List	   *pubobjects;		/* Optional list of publication objects */
 	bool		for_all_tables; /* Special publication for all tables in db */
 } CreatePublicationStmt;
 
@@ -3599,10 +3682,14 @@ typedef struct AlterPublicationStmt
 	/* parameters used for ALTER PUBLICATION ... WITH */
 	List	   *options;		/* List of DefElem nodes */
 
-	/* parameters used for ALTER PUBLICATION ... ADD/DROP TABLE */
-	List	   *tables;			/* List of tables to add/drop */
+	/*
+	 * Parameters used for ALTER PUBLICATION ... ADD/DROP/SET publication
+	 * objects.
+	 */
+	List	   *pubobjects;		/* Optional list of publication objects */
 	bool		for_all_tables; /* Special publication for all tables in db */
-	DefElemAction tableAction;	/* What action to perform with the tables */
+	DefElemAction action;		/* What action to perform with the
+								 * tables/schemas */
 } AlterPublicationStmt;
 
 typedef struct CreateSubscriptionStmt

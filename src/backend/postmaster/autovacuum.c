@@ -468,9 +468,6 @@ AutoVacLauncherMain(int argc, char *argv[])
 	pqsignal(SIGFPE, FloatExceptionHandler);
 	pqsignal(SIGCHLD, SIG_DFL);
 
-	/* Early initialization */
-	BaseInit();
-
 	/*
 	 * Create a per-backend PGPROC struct in shared memory, except in the
 	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do
@@ -480,6 +477,9 @@ AutoVacLauncherMain(int argc, char *argv[])
 #ifndef EXEC_BACKEND
 	InitProcess();
 #endif
+
+	/* Early initialization */
+	BaseInit();
 
 	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL, false);
 
@@ -754,7 +754,8 @@ AutoVacLauncherMain(int argc, char *argv[])
 					dlist_push_head(&AutoVacuumShmem->av_freeWorkers,
 									&worker->wi_links);
 					AutoVacuumShmem->av_startingWorker = NULL;
-					elog(WARNING, "worker took too long to start; canceled");
+					ereport(WARNING,
+							errmsg("autovacuum worker took too long to start; canceled"));
 				}
 			}
 			else
@@ -835,6 +836,10 @@ HandleAutoVacLauncherInterrupts(void)
 	/* Process barrier events */
 	if (ProcSignalBarrierPending)
 		ProcessProcSignalBarrier();
+
+	/* Perform logging of memory contexts of this process */
+	if (LogMemoryContextPending)
+		ProcessLogMemoryContextInterrupt();
 
 	/* Process sinval catchup interrupts that happened while sleeping */
 	ProcessCatchupInterrupt();
@@ -962,10 +967,10 @@ rebuild_database_list(Oid newdb)
 	autovac_refresh_stats();
 
 	newcxt = AllocSetContextCreate(AutovacMemCxt,
-								   "AV dblist",
+								   "Autovacuum database list",
 								   ALLOCSET_DEFAULT_SIZES);
 	tmpcxt = AllocSetContextCreate(newcxt,
-								   "tmp AV dblist",
+								   "Autovacuum database list (tmp)",
 								   ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(tmpcxt);
 
@@ -988,7 +993,7 @@ rebuild_database_list(Oid newdb)
 	hctl.keysize = sizeof(Oid);
 	hctl.entrysize = sizeof(avl_dbase);
 	hctl.hcxt = tmpcxt;
-	dbhash = hash_create("db hash", 20, &hctl,	/* magic number here FIXME */
+	dbhash = hash_create("autovacuum db hash", 20, &hctl,	/* magic number here FIXME */
 						 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	/* start by inserting the new database */
@@ -1175,7 +1180,7 @@ do_start_worker(void)
 	 * allocated for the database list.
 	 */
 	tmpcxt = AllocSetContextCreate(CurrentMemoryContext,
-								   "Start worker tmp cxt",
+								   "Autovacuum start worker (tmp)",
 								   ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(tmpcxt);
 
@@ -1546,9 +1551,6 @@ AutoVacWorkerMain(int argc, char *argv[])
 	pqsignal(SIGFPE, FloatExceptionHandler);
 	pqsignal(SIGCHLD, SIG_DFL);
 
-	/* Early initialization */
-	BaseInit();
-
 	/*
 	 * Create a per-backend PGPROC struct in shared memory, except in the
 	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do
@@ -1558,6 +1560,9 @@ AutoVacWorkerMain(int argc, char *argv[])
 #ifndef EXEC_BACKEND
 	InitProcess();
 #endif
+
+	/* Early initialization */
+	BaseInit();
 
 	/*
 	 * If an exception is encountered, processing resumes here.
@@ -1859,7 +1864,7 @@ autovac_balance_cost(void)
 		}
 
 		if (worker->wi_proc != NULL)
-			elog(DEBUG2, "autovac_balance_cost(pid=%u db=%u, rel=%u, dobalance=%s cost_limit=%d, cost_limit_base=%d, cost_delay=%g)",
+			elog(DEBUG2, "autovac_balance_cost(pid=%d db=%u, rel=%u, dobalance=%s cost_limit=%d, cost_limit_base=%d, cost_delay=%g)",
 				 worker->wi_proc->pid, worker->wi_dboid, worker->wi_tableoid,
 				 worker->wi_dobalance ? "yes" : "no",
 				 worker->wi_cost_limit, worker->wi_cost_limit_base,
@@ -1977,7 +1982,7 @@ do_autovacuum(void)
 	 * relations to vacuum/analyze across transactions.
 	 */
 	AutovacMemCxt = AllocSetContextCreate(TopMemoryContext,
-										  "AV worker",
+										  "Autovacuum worker",
 										  ALLOCSET_DEFAULT_SIZES);
 	MemoryContextSwitchTo(AutovacMemCxt);
 
@@ -2736,6 +2741,11 @@ deleted2:
  *
  * Given a relation's pg_class tuple, return the AutoVacOpts portion of
  * reloptions, if set; otherwise, return NULL.
+ *
+ * Note: callers do not have a relation lock on the table at this point,
+ * so the table could have been dropped, and its catalog rows gone, after
+ * we acquired the pg_class row.  If pg_class had a TOAST table, this would
+ * be a risk; fortunately, it doesn't.
  */
 static AutoVacOpts *
 extract_autovac_opts(HeapTuple tup, TupleDesc pg_class_desc)
@@ -2923,8 +2933,14 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 		tab->at_params.options = (dovacuum ? VACOPT_VACUUM : 0) |
 			(doanalyze ? VACOPT_ANALYZE : 0) |
 			(!wraparound ? VACOPT_SKIP_LOCKED : 0);
-		tab->at_params.index_cleanup = VACOPT_TERNARY_DEFAULT;
-		tab->at_params.truncate = VACOPT_TERNARY_DEFAULT;
+
+		/*
+		 * index_cleanup and truncate are unspecified at first in autovacuum.
+		 * They will be filled in with usable values using their reloptions
+		 * (or reloption defaults) later.
+		 */
+		tab->at_params.index_cleanup = VACOPTVALUE_UNSPECIFIED;
+		tab->at_params.truncate = VACOPTVALUE_UNSPECIFIED;
 		/* As of now, we don't support parallel vacuum for autovacuum */
 		tab->at_params.nworkers = -1;
 		tab->at_params.freeze_min_age = freeze_min_age;

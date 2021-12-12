@@ -59,10 +59,13 @@
 
 #include "common/int.h"
 #include "common/logging.h"
+#include "common/pg_prng.h"
 #include "common/string.h"
 #include "common/username.h"
 #include "fe_utils/cancel.h"
 #include "fe_utils/conditional.h"
+#include "fe_utils/option_utils.h"
+#include "fe_utils/string_utils.h"
 #include "getopt_long.h"
 #include "libpq-fe.h"
 #include "pgbench.h"
@@ -343,15 +346,13 @@ typedef struct StatsData
 } StatsData;
 
 /*
- * Struct to keep random state.
+ * For displaying Unix epoch timestamps, as some time functions may have
+ * another reference.
  */
-typedef struct RandomState
-{
-	unsigned short xseed[3];
-} RandomState;
+pg_time_usec_t epoch_shift;
 
 /* Various random sequences are initialized from this one. */
-static RandomState base_random_sequence;
+static pg_prng_state base_random_sequence;
 
 /* Synchronization barrier for start and connection */
 static THREAD_BARRIER_T barrier;
@@ -453,7 +454,7 @@ typedef struct
 	 * Separate randomness for each client. This is used for random functions
 	 * PGBENCH_RANDOM_* during the execution of the script.
 	 */
-	RandomState cs_func_rs;
+	pg_prng_state cs_func_rs;
 
 	int			use_file;		/* index in sql_script for this client */
 	int			command;		/* command number in script */
@@ -490,9 +491,9 @@ typedef struct
 	 * random state to make all of them independent of each other and
 	 * therefore deterministic at the thread level.
 	 */
-	RandomState ts_choose_rs;	/* random state for selecting a script */
-	RandomState ts_throttle_rs; /* random state for transaction throttling */
-	RandomState ts_sample_rs;	/* random state for log sampling */
+	pg_prng_state ts_choose_rs; /* random state for selecting a script */
+	pg_prng_state ts_throttle_rs;	/* random state for transaction throttling */
+	pg_prng_state ts_sample_rs; /* random state for log sampling */
 
 	int64		throttle_trigger;	/* previous/next throttling (us) */
 	FILE	   *logfile;		/* where to log, or NULL */
@@ -501,7 +502,7 @@ typedef struct
 	pg_time_usec_t create_time; /* thread creation time */
 	pg_time_usec_t started_time;	/* thread is running */
 	pg_time_usec_t bench_start; /* thread is benchmarking */
-	pg_time_usec_t conn_duration;	/* cumulated connection and deconnection
+	pg_time_usec_t conn_duration;	/* cumulated connection and disconnection
 									 * delays */
 
 	StatsData	stats;
@@ -890,42 +891,28 @@ strtodouble(const char *str, bool errorOK, double *dv)
 }
 
 /*
- * Initialize a random state struct.
+ * Initialize a prng state struct.
  *
  * We derive the seed from base_random_sequence, which must be set up already.
  */
 static void
-initRandomState(RandomState *random_state)
+initRandomState(pg_prng_state *state)
 {
-	random_state->xseed[0] = (unsigned short)
-		(pg_jrand48(base_random_sequence.xseed) & 0xFFFF);
-	random_state->xseed[1] = (unsigned short)
-		(pg_jrand48(base_random_sequence.xseed) & 0xFFFF);
-	random_state->xseed[2] = (unsigned short)
-		(pg_jrand48(base_random_sequence.xseed) & 0xFFFF);
+	pg_prng_seed(state, pg_prng_uint64(&base_random_sequence));
 }
 
+
 /*
- * Random number generator: uniform distribution from min to max inclusive.
+ * random number generator: uniform distribution from min to max inclusive.
  *
  * Although the limits are expressed as int64, you can't generate the full
  * int64 range in one call, because the difference of the limits mustn't
- * overflow int64.  In practice it's unwise to ask for more than an int32
- * range, because of the limited precision of pg_erand48().
+ * overflow int64.  This is not checked.
  */
 static int64
-getrand(RandomState *random_state, int64 min, int64 max)
+getrand(pg_prng_state *state, int64 min, int64 max)
 {
-	/*
-	 * Odd coding is so that min and max have approximately the same chance of
-	 * being selected as do numbers between them.
-	 *
-	 * pg_erand48() is thread-safe and concurrent, which is why we use it
-	 * rather than random(), which in glibc is non-reentrant, and therefore
-	 * protected by a mutex, and therefore a bottleneck on machines with many
-	 * CPUs.
-	 */
-	return min + (int64) ((max - min + 1) * pg_erand48(random_state->xseed));
+	return min + (int64) pg_prng_uint64_range(state, 0, max - min);
 }
 
 /*
@@ -934,7 +921,7 @@ getrand(RandomState *random_state, int64 min, int64 max)
  * value is exp(-parameter).
  */
 static int64
-getExponentialRand(RandomState *random_state, int64 min, int64 max,
+getExponentialRand(pg_prng_state *state, int64 min, int64 max,
 				   double parameter)
 {
 	double		cut,
@@ -944,8 +931,8 @@ getExponentialRand(RandomState *random_state, int64 min, int64 max,
 	/* abort if wrong parameter, but must really be checked beforehand */
 	Assert(parameter > 0.0);
 	cut = exp(-parameter);
-	/* erand in [0, 1), uniform in (0, 1] */
-	uniform = 1.0 - pg_erand48(random_state->xseed);
+	/* pg_prng_double value in [0, 1), uniform in (0, 1] */
+	uniform = 1.0 - pg_prng_double(state);
 
 	/*
 	 * inner expression in (cut, 1] (if parameter > 0), rand in [0, 1)
@@ -958,7 +945,7 @@ getExponentialRand(RandomState *random_state, int64 min, int64 max,
 
 /* random number generator: gaussian distribution from min to max inclusive */
 static int64
-getGaussianRand(RandomState *random_state, int64 min, int64 max,
+getGaussianRand(pg_prng_state *state, int64 min, int64 max,
 				double parameter)
 {
 	double		stdev;
@@ -982,13 +969,13 @@ getGaussianRand(RandomState *random_state, int64 min, int64 max,
 	do
 	{
 		/*
-		 * pg_erand48 generates [0,1), but for the basic version of the
+		 * pg_prng_double generates [0, 1), but for the basic version of the
 		 * Box-Muller transform the two uniformly distributed random numbers
-		 * are expected in (0, 1] (see
+		 * are expected to be in (0, 1] (see
 		 * https://en.wikipedia.org/wiki/Box-Muller_transform)
 		 */
-		double		rand1 = 1.0 - pg_erand48(random_state->xseed);
-		double		rand2 = 1.0 - pg_erand48(random_state->xseed);
+		double		rand1 = 1.0 - pg_prng_double(state);
+		double		rand2 = 1.0 - pg_prng_double(state);
 
 		/* Box-Muller basic form transform */
 		double		var_sqrt = sqrt(-2.0 * log(rand1));
@@ -1018,7 +1005,7 @@ getGaussianRand(RandomState *random_state, int64 min, int64 max,
  * not be one.
  */
 static int64
-getPoissonRand(RandomState *random_state, double center)
+getPoissonRand(pg_prng_state *state, double center)
 {
 	/*
 	 * Use inverse transform sampling to generate a value > 0, such that the
@@ -1026,8 +1013,8 @@ getPoissonRand(RandomState *random_state, double center)
 	 */
 	double		uniform;
 
-	/* erand in [0, 1), uniform in (0, 1] */
-	uniform = 1.0 - pg_erand48(random_state->xseed);
+	/* pg_prng_double value in [0, 1), uniform in (0, 1] */
+	uniform = 1.0 - pg_prng_double(state);
 
 	return (int64) (-log(uniform) * center + 0.5);
 }
@@ -1040,7 +1027,7 @@ getPoissonRand(RandomState *random_state, double center)
  * This works for s > 1.0, but may perform badly for s very close to 1.0.
  */
 static int64
-computeIterativeZipfian(RandomState *random_state, int64 n, double s)
+computeIterativeZipfian(pg_prng_state *state, int64 n, double s)
 {
 	double		b = pow(2.0, s - 1.0);
 	double		x,
@@ -1055,8 +1042,8 @@ computeIterativeZipfian(RandomState *random_state, int64 n, double s)
 	while (true)
 	{
 		/* random variates */
-		u = pg_erand48(random_state->xseed);
-		v = pg_erand48(random_state->xseed);
+		u = pg_prng_double(state);
+		v = pg_prng_double(state);
 
 		x = floor(pow(u, -1.0 / (s - 1.0)));
 
@@ -1070,14 +1057,14 @@ computeIterativeZipfian(RandomState *random_state, int64 n, double s)
 
 /* random number generator: zipfian distribution from min to max inclusive */
 static int64
-getZipfianRand(RandomState *random_state, int64 min, int64 max, double s)
+getZipfianRand(pg_prng_state *state, int64 min, int64 max, double s)
 {
 	int64		n = max - min + 1;
 
 	/* abort if parameter is invalid */
 	Assert(MIN_ZIPFIAN_PARAM <= s && s <= MAX_ZIPFIAN_PARAM);
 
-	return min - 1 + computeIterativeZipfian(random_state, n, s);
+	return min - 1 + computeIterativeZipfian(state, n, s);
 }
 
 /*
@@ -1134,7 +1121,7 @@ getHashMurmur2(int64 val, uint64 seed)
  * For small sizes, this generates each of the (size!) possible permutations
  * of integers in the range [0, size) with roughly equal probability.  Once
  * the size is larger than 20, the number of possible permutations exceeds the
- * number of distinct states of the internal pseudorandom number generators,
+ * number of distinct states of the internal pseudorandom number generator,
  * and so not all possible permutations can be generated, but the permutations
  * chosen should continue to give the appearance of being random.
  *
@@ -1144,8 +1131,8 @@ getHashMurmur2(int64 val, uint64 seed)
 static int64
 permute(const int64 val, const int64 isize, const int64 seed)
 {
-	RandomState random_state1;
-	RandomState random_state2;
+	/* using a high-end PRNG is probably overkill */
+	pg_prng_state state;
 	uint64		size;
 	uint64		v;
 	int			masklen;
@@ -1155,14 +1142,8 @@ permute(const int64 val, const int64 isize, const int64 seed)
 	if (isize < 2)
 		return 0;				/* nothing to permute */
 
-	/* Initialize a pair of random states using the seed */
-	random_state1.xseed[0] = seed & 0xFFFF;
-	random_state1.xseed[1] = (seed >> 16) & 0xFFFF;
-	random_state1.xseed[2] = (seed >> 32) & 0xFFFF;
-
-	random_state2.xseed[0] = (((uint64) seed) >> 48) & 0xFFFF;
-	random_state2.xseed[1] = seed & 0xFFFF;
-	random_state2.xseed[2] = (seed >> 16) & 0xFFFF;
+	/* Initialize prng state using the seed */
+	pg_prng_seed(&state, (uint64) seed);
 
 	/* Computations are performed on unsigned values */
 	size = (uint64) isize;
@@ -1208,8 +1189,8 @@ permute(const int64 val, const int64 isize, const int64 seed)
 					t;
 
 		/* Random multiply (by an odd number), XOR and rotate of lower half */
-		m = (uint64) getrand(&random_state1, 0, mask) | 1;
-		r = (uint64) getrand(&random_state2, 0, mask);
+		m = (pg_prng_uint64(&state) & mask) | 1;
+		r = pg_prng_uint64(&state) & mask;
 		if (v <= mask)
 		{
 			v = ((v * m) ^ r) & mask;
@@ -1217,8 +1198,8 @@ permute(const int64 val, const int64 isize, const int64 seed)
 		}
 
 		/* Random multiply (by an odd number), XOR and rotate of upper half */
-		m = (uint64) getrand(&random_state1, 0, mask) | 1;
-		r = (uint64) getrand(&random_state2, 0, mask);
+		m = (pg_prng_uint64(&state) & mask) | 1;
+		r = pg_prng_uint64(&state) & mask;
 		t = size - 1 - v;
 		if (t <= mask)
 		{
@@ -1228,7 +1209,7 @@ permute(const int64 val, const int64 isize, const int64 seed)
 		}
 
 		/* Random offset */
-		r = (uint64) getrand(&random_state2, 0, size - 1);
+		r = pg_prng_uint64_range(&state, 0, size - 1);
 		v = (v + r) % size;
 	}
 
@@ -2449,7 +2430,8 @@ evalStandardFunc(CState *st,
 		case PGBENCH_RANDOM_ZIPFIAN:
 			{
 				int64		imin,
-							imax;
+							imax,
+							delta;
 
 				Assert(nargs >= 2);
 
@@ -2458,12 +2440,13 @@ evalStandardFunc(CState *st,
 					return false;
 
 				/* check random range */
-				if (imin > imax)
+				if (unlikely(imin > imax))
 				{
 					pg_log_error("empty range given to random");
 					return false;
 				}
-				else if (imax - imin < 0 || (imax - imin) + 1 < 0)
+				else if (unlikely(pg_sub_s64_overflow(imax, imin, &delta) ||
+								  pg_add_s64_overflow(delta, 1, &delta)))
 				{
 					/* prevent int overflows in random functions */
 					pg_log_error("random range is too large");
@@ -3171,6 +3154,10 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 
 					if ((st->con = doConnect()) == NULL)
 					{
+						/*
+						 * as the bench is already running, we do not abort
+						 * the process
+						 */
 						pg_log_error("client %d aborted while establishing connection", st->id);
 						st->state = CSTATE_ABORTED;
 						break;
@@ -3223,31 +3210,36 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				/*
 				 * If --latency-limit is used, and this slot is already late
 				 * so that the transaction will miss the latency limit even if
-				 * it completed immediately, skip this time slot and schedule
-				 * to continue running on the next slot that isn't late yet.
-				 * But don't iterate beyond the -t limit, if one is given.
+				 * it completed immediately, skip this time slot and loop to
+				 * reschedule.
 				 */
 				if (latency_limit)
 				{
 					pg_time_now_lazy(&now);
 
-					while (thread->throttle_trigger < now - latency_limit &&
-						   (nxacts <= 0 || st->cnt < nxacts))
+					if (thread->throttle_trigger < now - latency_limit)
 					{
 						processXactStats(thread, st, &now, true, agg);
-						/* next rendez-vous */
-						thread->throttle_trigger +=
-							getPoissonRand(&thread->ts_throttle_rs, throttle_delay);
-						st->txn_scheduled = thread->throttle_trigger;
-					}
 
-					/*
-					 * stop client if -t was exceeded in the previous skip
-					 * loop
-					 */
-					if (nxacts > 0 && st->cnt >= nxacts)
-					{
-						st->state = CSTATE_FINISHED;
+						/*
+						 * Finish client if -T or -t was exceeded.
+						 *
+						 * Stop counting skipped transactions under -T as soon
+						 * as the timer is exceeded. Because otherwise it can
+						 * take a very long time to count all of them
+						 * especially when quite a lot of them happen with
+						 * unrealistically high rate setting in -R, which
+						 * would prevent pgbench from ending immediately.
+						 * Because of this behavior, note that there is no
+						 * guarantee that all skipped transactions are counted
+						 * under -T though there is under -t. This is OK in
+						 * practice because it's very unlikely to happen with
+						 * realistic setting.
+						 */
+						if (timer_exceeded || (nxacts > 0 && st->cnt >= nxacts))
+							st->state = CSTATE_FINISHED;
+
+						/* Go back to top of loop with CSTATE_PREPARE_THROTTLE */
 						break;
 					}
 				}
@@ -3451,7 +3443,14 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 */
 			case CSTATE_WAIT_RESULT:
 				pg_log_debug("client %d receiving", st->id);
-				if (!PQconsumeInput(st->con))
+
+				/*
+				 * Only check for new network data if we processed all data
+				 * fetched prior. Otherwise we end up doing a syscall for each
+				 * individual pipelined query, which has a measurable
+				 * performance impact.
+				 */
+				if (PQisBusy(st->con) && !PQconsumeInput(st->con))
 				{
 					/* there's something wrong */
 					commandFailed(st, "SQL", "perhaps the backend died while processing");
@@ -3536,8 +3535,12 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 
 				if (is_connect)
 				{
+					pg_time_usec_t start = now;
+
+					pg_time_now_lazy(&start);
 					finishCon(st);
-					now = 0;
+					now = pg_time_now();
+					thread->conn_duration += now - start;
 				}
 
 				if ((st->cnt >= nxacts && duration <= 0) || timer_exceeded)
@@ -3561,6 +3564,19 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 */
 			case CSTATE_ABORTED:
 			case CSTATE_FINISHED:
+
+				/*
+				 * Don't measure the disconnection delays here even if in
+				 * CSTATE_FINISHED and -C/--connect option is specified.
+				 * Because in this case all the connections that this thread
+				 * established are closed at the end of transactions and the
+				 * disconnection delays should have already been measured at
+				 * that moment.
+				 *
+				 * In CSTATE_ABORTED state, the measurement is no longer
+				 * necessary because we cannot report complete results anyways
+				 * in this case.
+				 */
 				finishCon(st);
 				return;
 		}
@@ -3769,16 +3785,17 @@ executeMetaCommand(CState *st, pg_time_usec_t *now)
  * Print log entry after completing one transaction.
  *
  * We print Unix-epoch timestamps in the log, so that entries can be
- * correlated against other logs.  On some platforms this could be obtained
- * from the caller, but rather than get entangled with that, we just eat
- * the cost of an extra syscall in all cases.
+ * correlated against other logs.
+ *
+ * XXX We could obtain the time from the caller and just shift it here, to
+ * avoid the cost of an extra call to pg_time_now().
  */
 static void
 doLog(TState *thread, CState *st,
 	  StatsData *agg, bool skipped, double latency, double lag)
 {
 	FILE	   *logfile = thread->logfile;
-	pg_time_usec_t now = pg_time_now();
+	pg_time_usec_t now = pg_time_now() + epoch_shift;
 
 	Assert(use_log);
 
@@ -3787,23 +3804,25 @@ doLog(TState *thread, CState *st,
 	 * to the random sample.
 	 */
 	if (sample_rate != 0.0 &&
-		pg_erand48(thread->ts_sample_rs.xseed) > sample_rate)
+		pg_prng_double(&thread->ts_sample_rs) > sample_rate)
 		return;
 
 	/* should we aggregate the results or not? */
 	if (agg_interval > 0)
 	{
+		pg_time_usec_t next;
+
 		/*
 		 * Loop until we reach the interval of the current moment, and print
 		 * any empty intervals in between (this may happen with very low tps,
 		 * e.g. --rate=0.1).
 		 */
 
-		while (agg->start_time + agg_interval <= now)
+		while ((next = agg->start_time + agg_interval * INT64CONST(1000000)) <= now)
 		{
 			/* print aggregated report to logfile */
 			fprintf(logfile, INT64_FORMAT " " INT64_FORMAT " %.0f %.0f %.0f %.0f",
-					agg->start_time,
+					agg->start_time / 1000000,	/* seconds since Unix epoch */
 					agg->cnt,
 					agg->latency.sum,
 					agg->latency.sum2,
@@ -3822,7 +3841,7 @@ doLog(TState *thread, CState *st,
 			fputc('\n', logfile);
 
 			/* reset data and move to next interval */
-			initStats(agg, agg->start_time + agg_interval);
+			initStats(agg, next);
 		}
 
 		/* accumulate the current transaction */
@@ -4116,6 +4135,7 @@ initGenerateDataClientSide(PGconn *con)
 	PGresult   *res;
 	int			i;
 	int64		k;
+	char		*copy_statement;
 
 	/* used to track elapsed time and estimate of the remaining time */
 	pg_time_usec_t start;
@@ -4162,7 +4182,15 @@ initGenerateDataClientSide(PGconn *con)
 	/*
 	 * accounts is big enough to be worth using COPY and tracking runtime
 	 */
-	res = PQexec(con, "copy pgbench_accounts from stdin");
+
+	/* use COPY with FREEZE on v14 and later without partioning */
+	if (partitions == 0 && PQserverVersion(con) >= 140000)
+		copy_statement = "copy pgbench_accounts from stdin with (freeze on)";
+	else
+		copy_statement = "copy pgbench_accounts from stdin";
+
+	res = PQexec(con, copy_statement);
+
 	if (PQresultStatus(res) != PGRES_COPY_IN)
 	{
 		pg_log_fatal("unexpected copy in result: %s", PQerrorMessage(con));
@@ -4405,7 +4433,10 @@ runInitSteps(const char *initialize_steps)
 	initPQExpBuffer(&stats);
 
 	if ((con = doConnect()) == NULL)
+	{
+		pg_log_fatal("could not create connection for initialization");
 		exit(1);
+	}
 
 	setup_cancel_handler(NULL);
 	SetCancelConn(con);
@@ -5149,7 +5180,7 @@ ParseScript(const char *script, const char *desc, int weight)
 
 					if (index == 0)
 						syntax_error(desc, lineno, NULL, NULL,
-									 "\\gset must follow a SQL command",
+									 "\\gset must follow an SQL command",
 									 NULL, -1);
 
 					cmd = ps.commands[index - 1];
@@ -5157,7 +5188,7 @@ ParseScript(const char *script, const char *desc, int weight)
 					if (cmd->type != SQL_COMMAND ||
 						cmd->varprefix != NULL)
 						syntax_error(desc, lineno, NULL, NULL,
-									 "\\gset must follow a SQL command",
+									 "\\gset must follow an SQL command",
 									 cmd->first_line, -1);
 
 					/* get variable prefix */
@@ -5359,8 +5390,8 @@ parseScriptWeight(const char *option, char **script)
 		}
 		if (wtmp > INT_MAX || wtmp < 0)
 		{
-			pg_log_fatal("weight specification out of range (0 .. %u): " INT64_FORMAT,
-						 INT_MAX, (int64) wtmp);
+			pg_log_fatal("weight specification out of range (0 .. %d): %lld",
+						 INT_MAX, (long long) wtmp);
 			exit(1);
 		}
 		weight = wtmp;
@@ -5455,7 +5486,8 @@ printProgressReport(TState *threads, int64 test_start, pg_time_usec_t now,
 
 	if (progress_timestamp)
 	{
-		snprintf(tbuf, sizeof(tbuf), "%.3f s", PG_TIME_GET_DOUBLE(now));
+		snprintf(tbuf, sizeof(tbuf), "%.3f s",
+				 PG_TIME_GET_DOUBLE(now + epoch_shift));
 	}
 	else
 	{
@@ -5493,6 +5525,37 @@ printSimpleStats(const char *prefix, SimpleStats *ss)
 	}
 }
 
+/* print version banner */
+static void
+printVersion(PGconn *con)
+{
+	int			server_ver = PQserverVersion(con);
+	int			client_ver = PG_VERSION_NUM;
+
+	if (server_ver != client_ver)
+	{
+		const char *server_version;
+		char		sverbuf[32];
+
+		/* Try to get full text form, might include "devel" etc */
+		server_version = PQparameterStatus(con, "server_version");
+		/* Otherwise fall back on server_ver */
+		if (!server_version)
+		{
+			formatPGVersionNumber(server_ver, true,
+								  sverbuf, sizeof(sverbuf));
+			server_version = sverbuf;
+		}
+
+		printf(_("%s (%s, server %s)\n"),
+			   "pgbench", PG_VERSION, server_version);
+	}
+	/* For version match, only print pgbench version */
+	else
+		printf("%s (%s)\n", "pgbench", PG_VERSION);
+	fflush(stdout);
+}
+
 /* print out results */
 static void
 printResults(StatsData *total,
@@ -5506,7 +5569,6 @@ printResults(StatsData *total,
 	double		bench_duration = PG_TIME_GET_DOUBLE(total_duration);
 	double		tps = ntx / bench_duration;
 
-	printf("pgbench (PostgreSQL) %d.%d\n", PG_VERSION_NUM / 10000, PG_VERSION_NUM % 100);
 	/* Report test parameters. */
 	printf("transaction type: %s\n",
 		   num_scripts == 1 ? sql_script[0].desc : "multiple scripts");
@@ -5680,13 +5742,12 @@ set_random_seed(const char *seed)
 	}
 
 	if (seed != NULL)
-		pg_log_info("setting random seed to " UINT64_FORMAT, iseed);
+		pg_log_info("setting random seed to %llu", (unsigned long long) iseed);
+
 	random_seed = iseed;
 
-	/* Fill base_random_sequence with low-order bits of seed */
-	base_random_sequence.xseed[0] = iseed & 0xFFFF;
-	base_random_sequence.xseed[1] = (iseed >> 16) & 0xFFFF;
-	base_random_sequence.xseed[2] = (iseed >> 32) & 0xFFFF;
+	/* Initialize base_random_sequence using seed */
+	pg_prng_seed(&base_random_sequence, (uint64) iseed);
 
 	return true;
 }
@@ -5775,6 +5836,14 @@ main(int argc, char **argv)
 	char	   *env;
 
 	int			exit_code = 0;
+	struct timeval tv;
+
+	/*
+	 * Record difference between Unix time and instr_time time.  We'll use
+	 * this for logging and aggregation.
+	 */
+	gettimeofday(&tv, NULL);
+	epoch_shift = tv.tv_sec * INT64CONST(1000000) + tv.tv_usec - pg_time_now();
 
 	pg_logging_init(argv[0]);
 	progname = get_progname(argv[0]);
@@ -5836,10 +5905,9 @@ main(int argc, char **argv)
 				break;
 			case 'c':
 				benchmarking_option_set = true;
-				nclients = atoi(optarg);
-				if (nclients <= 0)
+				if (!option_parse_int(optarg, "-c/--clients", 1, INT_MAX,
+									  &nclients))
 				{
-					pg_log_fatal("invalid number of clients: \"%s\"", optarg);
 					exit(1);
 				}
 #ifdef HAVE_GETRLIMIT
@@ -5863,10 +5931,9 @@ main(int argc, char **argv)
 				break;
 			case 'j':			/* jobs */
 				benchmarking_option_set = true;
-				nthreads = atoi(optarg);
-				if (nthreads <= 0)
+				if (!option_parse_int(optarg, "-j/--jobs", 1, INT_MAX,
+									  &nthreads))
 				{
-					pg_log_fatal("invalid number of threads: \"%s\"", optarg);
 					exit(1);
 				}
 #ifndef ENABLE_THREAD_SAFETY
@@ -5887,30 +5954,21 @@ main(int argc, char **argv)
 				break;
 			case 's':
 				scale_given = true;
-				scale = atoi(optarg);
-				if (scale <= 0)
-				{
-					pg_log_fatal("invalid scaling factor: \"%s\"", optarg);
+				if (!option_parse_int(optarg, "-s/--scale", 1, INT_MAX,
+									  &scale))
 					exit(1);
-				}
 				break;
 			case 't':
 				benchmarking_option_set = true;
-				nxacts = atoi(optarg);
-				if (nxacts <= 0)
-				{
-					pg_log_fatal("invalid number of transactions: \"%s\"", optarg);
+				if (!option_parse_int(optarg, "-t/--transactions", 1, INT_MAX,
+									  &nxacts))
 					exit(1);
-				}
 				break;
 			case 'T':
 				benchmarking_option_set = true;
-				duration = atoi(optarg);
-				if (duration <= 0)
-				{
-					pg_log_fatal("invalid duration: \"%s\"", optarg);
+				if (!option_parse_int(optarg, "-T/--time", 1, INT_MAX,
+									  &duration))
 					exit(1);
-				}
 				break;
 			case 'U':
 				username = pg_strdup(optarg);
@@ -5968,12 +6026,9 @@ main(int argc, char **argv)
 				break;
 			case 'F':
 				initialization_option_set = true;
-				fillfactor = atoi(optarg);
-				if (fillfactor < 10 || fillfactor > 100)
-				{
-					pg_log_fatal("invalid fillfactor: \"%s\"", optarg);
+				if (!option_parse_int(optarg, "-F/--fillfactor", 10, 100,
+									  &fillfactor))
 					exit(1);
-				}
 				break;
 			case 'M':
 				benchmarking_option_set = true;
@@ -5988,12 +6043,9 @@ main(int argc, char **argv)
 				break;
 			case 'P':
 				benchmarking_option_set = true;
-				progress = atoi(optarg);
-				if (progress <= 0)
-				{
-					pg_log_fatal("invalid thread progress delay: \"%s\"", optarg);
+				if (!option_parse_int(optarg, "-P/--progress", 1, INT_MAX,
+									  &progress))
 					exit(1);
-				}
 				break;
 			case 'R':
 				{
@@ -6047,12 +6099,9 @@ main(int argc, char **argv)
 				break;
 			case 5:				/* aggregate-interval */
 				benchmarking_option_set = true;
-				agg_interval = atoi(optarg);
-				if (agg_interval <= 0)
-				{
-					pg_log_fatal("invalid number of seconds for aggregation: \"%s\"", optarg);
+				if (!option_parse_int(optarg, "--aggregate-interval", 1, INT_MAX,
+									  &agg_interval))
 					exit(1);
-				}
 				break;
 			case 6:				/* progress-timestamp */
 				progress_timestamp = true;
@@ -6084,12 +6133,9 @@ main(int argc, char **argv)
 				break;
 			case 11:			/* partitions */
 				initialization_option_set = true;
-				partitions = atoi(optarg);
-				if (partitions < 0)
-				{
-					pg_log_fatal("invalid number of partitions: \"%s\"", optarg);
+				if (!option_parse_int(optarg, "--partitions", 1, INT_MAX,
+									  &partitions))
 					exit(1);
-				}
 				break;
 			case 12:			/* partition-method */
 				initialization_option_set = true;
@@ -6332,7 +6378,13 @@ main(int argc, char **argv)
 	/* opening connection... */
 	con = doConnect();
 	if (con == NULL)
+	{
+		pg_log_fatal("could not create connection for setup");
 		exit(1);
+	}
+
+	/* report pgbench and server versions */
+	printVersion(con);
 
 	pg_log_debug("pghost: %s pgport: %s nclients: %d %s: %d dbName: %s",
 				 PQhost(con), PQport(con), nclients,
@@ -6369,9 +6421,7 @@ main(int argc, char **argv)
 	/* set default seed for hash functions */
 	if (lookupVariable(&state[0], "default_seed") == NULL)
 	{
-		uint64		seed =
-		((uint64) pg_jrand48(base_random_sequence.xseed) & 0xFFFFFFFF) |
-		(((uint64) pg_jrand48(base_random_sequence.xseed) & 0xFFFFFFFF) << 32);
+		uint64		seed = pg_prng_uint64(&base_random_sequence);
 
 		for (i = 0; i < nclients; i++)
 			if (!putVariableInt(&state[i], "startup", "default_seed", (int64) seed))
@@ -6437,7 +6487,10 @@ main(int argc, char **argv)
 
 	errno = THREAD_BARRIER_INIT(&barrier, nthreads);
 	if (errno != 0)
+	{
 		pg_log_fatal("could not initialize barrier: %m");
+		exit(1);
+	}
 
 #ifdef ENABLE_THREAD_SAFETY
 	/* start all threads but thread 0 which is executed directly later */
@@ -6480,7 +6533,7 @@ main(int argc, char **argv)
 #endif							/* ENABLE_THREAD_SAFETY */
 
 		for (int j = 0; j < thread->nstate; j++)
-			if (thread->state[j].state == CSTATE_ABORTED)
+			if (thread->state[j].state != CSTATE_FINISHED)
 				exit_code = 2;
 
 		/* aggregate thread level stats */
@@ -6496,7 +6549,11 @@ main(int argc, char **argv)
 			bench_start = thread->bench_start;
 	}
 
-	/* XXX should this be connection time? */
+	/*
+	 * All connections should be already closed in threadRun(), so this
+	 * disconnect_all() will be a no-op, but clean up the connecions just to
+	 * be sure. We don't need to measure the disconnection delays here.
+	 */
 	disconnect_all(state, nclients);
 
 	/*
@@ -6548,7 +6605,7 @@ threadRun(void *arg)
 		if (thread->logfile == NULL)
 		{
 			pg_log_fatal("could not open logfile \"%s\": %m", logpath);
-			goto done;
+			exit(1);
 		}
 	}
 
@@ -6561,6 +6618,7 @@ threadRun(void *arg)
 
 	thread_start = pg_time_now();
 	thread->started_time = thread_start;
+	thread->conn_duration = 0;
 	last_report = thread_start;
 	next_report = last_report + (int64) 1000000 * progress;
 
@@ -6572,26 +6630,12 @@ threadRun(void *arg)
 		{
 			if ((state[i].con = doConnect()) == NULL)
 			{
-				/*
-				 * On connection failure, we meet the barrier here in place of
-				 * GO before proceeding to the "done" path which will cleanup,
-				 * so as to avoid locking the process.
-				 *
-				 * It is unclear whether it is worth doing anything rather than
-				 * coldly exiting with an error message.
-				 */
-				THREAD_BARRIER_WAIT(&barrier);
-				goto done;
+				/* coldly abort on initial connection failure */
+				pg_log_fatal("could not create connection for client %d",
+							 state[i].id);
+				exit(1);
 			}
 		}
-
-		/* compute connection delay */
-		thread->conn_duration = pg_time_now() - thread->started_time;
-	}
-	else
-	{
-		/* no connection delay to record */
-		thread->conn_duration = 0;
 	}
 
 	/* GO */
@@ -6601,7 +6645,14 @@ threadRun(void *arg)
 	thread->bench_start = start;
 	thread->throttle_trigger = start;
 
-	initStats(&aggs, start);
+	/*
+	 * The log format currently has Unix epoch timestamps with whole numbers
+	 * of seconds.  Round the first aggregate's start time down to the nearest
+	 * Unix epoch second (the very first aggregate might really have started a
+	 * fraction of a second later, but later aggregates are measured from the
+	 * whole number time that is actually logged).
+	 */
+	initStats(&aggs, (start + epoch_shift) / 1000000 * 1000000);
 	last = aggs;
 
 	/* loop till all clients have terminated */
@@ -6707,7 +6758,7 @@ threadRun(void *arg)
 					continue;
 				}
 				/* must be something wrong */
-				pg_log_fatal("%s() failed: %m", SOCKET_WAIT_METHOD);
+				pg_log_error("%s() failed: %m", SOCKET_WAIT_METHOD);
 				goto done;
 			}
 		}
@@ -6785,9 +6836,7 @@ threadRun(void *arg)
 	}
 
 done:
-	start = pg_time_now();
 	disconnect_all(state, nstate);
-	thread->conn_duration += pg_time_now() - start;
 
 	if (thread->logfile)
 	{

@@ -252,14 +252,13 @@ pgstat_relation(Relation rel, FunctionCallInfo fcinfo)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot access temporary tables of other sessions")));
 
-	switch (rel->rd_rel->relkind)
+	if (RELKIND_HAS_TABLE_AM(rel->rd_rel->relkind) ||
+		rel->rd_rel->relkind == RELKIND_SEQUENCE)
 	{
-		case RELKIND_RELATION:
-		case RELKIND_MATVIEW:
-		case RELKIND_TOASTVALUE:
-		case RELKIND_SEQUENCE:
 			return pgstat_heap(rel, fcinfo);
-		case RELKIND_INDEX:
+	}
+	else if (rel->rd_rel->relkind == RELKIND_INDEX)
+	{
 			switch (rel->rd_rel->relam)
 			{
 				case BTREE_AM_OID:
@@ -284,31 +283,20 @@ pgstat_relation(Relation rel, FunctionCallInfo fcinfo)
 					err = "unknown index";
 					break;
 			}
-			break;
-		case RELKIND_VIEW:
-			err = "view";
-			break;
-		case RELKIND_COMPOSITE_TYPE:
-			err = "composite type";
-			break;
-		case RELKIND_FOREIGN_TABLE:
-			err = "foreign table";
-			break;
-		case RELKIND_PARTITIONED_TABLE:
-			err = "partitioned table";
-			break;
-		case RELKIND_PARTITIONED_INDEX:
-			err = "partitioned index";
-			break;
-		default:
-			err = "unknown";
-			break;
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("index \"%s\" (%s) is not supported",
+							RelationGetRelationName(rel), err)));
+	}
+	else
+	{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot get tuple-level statistics for relation \"%s\"",
+							RelationGetRelationName(rel)),
+					 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 	}
 
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("\"%s\" (%s) is not supported",
-					RelationGetRelationName(rel), err)));
 	return 0;					/* should not happen */
 }
 

@@ -303,6 +303,8 @@ index_compute_xid_horizon_for_tuples(Relation irel,
 
 	Assert(nitems > 0);
 
+	delstate.irel = irel;
+	delstate.iblknum = BufferGetBlockNumber(ibuf);
 	delstate.bottomup = false;
 	delstate.bottomupfreespace = 0;
 	delstate.ndeltids = 0;
@@ -312,16 +314,17 @@ index_compute_xid_horizon_for_tuples(Relation irel,
 	/* identify what the index tuples about to be deleted point to */
 	for (int i = 0; i < nitems; i++)
 	{
+		OffsetNumber offnum = itemnos[i];
 		ItemId		iitemid;
 
-		iitemid = PageGetItemId(ipage, itemnos[i]);
+		iitemid = PageGetItemId(ipage, offnum);
 		itup = (IndexTuple) PageGetItem(ipage, iitemid);
 
 		Assert(ItemIdIsDead(iitemid));
 
 		ItemPointerCopy(&itup->t_tid, &delstate.deltids[i].tid);
 		delstate.deltids[i].id = delstate.ndeltids;
-		delstate.status[i].idxoffnum = InvalidOffsetNumber; /* unused */
+		delstate.status[i].idxoffnum = offnum;
 		delstate.status[i].knowndeletable = true;	/* LP_DEAD-marked */
 		delstate.status[i].promising = false;	/* unused */
 		delstate.status[i].freespace = 0;	/* unused */
@@ -612,8 +615,8 @@ systable_endscan(SysScanDesc sysscan)
 		UnregisterSnapshot(sysscan->snapshot);
 
 	/*
-	 * Reset the bsysscan flag at the end of the systable scan.  See
-	 * detailed comments in xact.c where these variables are declared.
+	 * Reset the bsysscan flag at the end of the systable scan.  See detailed
+	 * comments in xact.c where these variables are declared.
 	 */
 	if (TransactionIdIsValid(CheckXidAlive))
 		bsysscan = false;
@@ -633,7 +636,7 @@ systable_endscan(SysScanDesc sysscan)
  * Currently we do not support non-index-based scans here.  (In principle
  * we could do a heapscan and sort, but the uses are in places that
  * probably don't need to still work with corrupted catalog indexes.)
- * For the moment, therefore, these functions are merely the thinnest of
+ * For the moment, therefore, these functions are merely the thinest of
  * wrappers around index_beginscan/index_getnext_slot.  The main reason for
  * their existence is to centralize possible future support of lossy operators
  * in catalog scans.

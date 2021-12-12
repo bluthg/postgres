@@ -287,7 +287,8 @@ extern ProjectionInfo *ExecBuildProjectionInfo(List *targetList,
 											   TupleTableSlot *slot,
 											   PlanState *parent,
 											   TupleDesc inputDesc);
-extern ProjectionInfo *ExecBuildUpdateProjection(List *subTargetList,
+extern ProjectionInfo *ExecBuildUpdateProjection(List *targetList,
+												 bool evalTargetList,
 												 List *targetColnos,
 												 TupleDesc relDesc,
 												 ExprContext *econtext,
@@ -458,7 +459,7 @@ typedef bool (*ExecScanRecheckMtd) (ScanState *node, TupleTableSlot *slot);
 extern TupleTableSlot *ExecScan(ScanState *node, ExecScanAccessMtd accessMtd,
 								ExecScanRecheckMtd recheckMtd);
 extern void ExecAssignScanProjectionInfo(ScanState *node);
-extern void ExecAssignScanProjectionInfoWithVarno(ScanState *node, Index varno);
+extern void ExecAssignScanProjectionInfoWithVarno(ScanState *node, int varno);
 extern void ExecScanReScan(ScanState *node);
 
 /*
@@ -551,7 +552,7 @@ extern const TupleTableSlotOps *ExecGetResultSlotOps(PlanState *planstate,
 extern void ExecAssignProjectionInfo(PlanState *planstate,
 									 TupleDesc inputDesc);
 extern void ExecConditionalAssignProjectionInfo(PlanState *planstate,
-												TupleDesc inputDesc, Index varno);
+												TupleDesc inputDesc, int varno);
 extern void ExecFreeExprContext(PlanState *planstate);
 extern void ExecAssignScanType(ScanState *scanstate, TupleDesc tupDesc);
 extern void ExecCreateScanSlotFromOuterPlan(EState *estate,
@@ -596,6 +597,7 @@ extern int	ExecCleanTargetListLength(List *targetlist);
 extern TupleTableSlot *ExecGetTriggerOldSlot(EState *estate, ResultRelInfo *relInfo);
 extern TupleTableSlot *ExecGetTriggerNewSlot(EState *estate, ResultRelInfo *relInfo);
 extern TupleTableSlot *ExecGetReturningSlot(EState *estate, ResultRelInfo *relInfo);
+extern TupleConversionMap *ExecGetChildToRootMap(ResultRelInfo *resultRelInfo);
 
 extern Bitmapset *ExecGetInsertedCols(ResultRelInfo *relinfo, EState *estate);
 extern Bitmapset *ExecGetUpdatedCols(ResultRelInfo *relinfo, EState *estate);
@@ -645,9 +647,15 @@ extern void CheckCmdReplicaIdentity(Relation rel, CmdType cmd);
 extern void CheckSubscriptionRelkind(char relkind, const char *nspname,
 									 const char *relname);
 
-/* needed by trigger.c */
+/*
+ * prototypes from functions in nodeModifyTable.c
+ */
 extern TupleTableSlot *ExecGetUpdateNewTuple(ResultRelInfo *relinfo,
 											 TupleTableSlot *planSlot,
 											 TupleTableSlot *oldSlot);
+extern ResultRelInfo *ExecLookupResultRelByOid(ModifyTableState *node,
+											   Oid resultoid,
+											   bool missing_ok,
+											   bool update_cache);
 
 #endif							/* EXECUTOR_H  */

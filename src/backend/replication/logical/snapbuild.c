@@ -165,15 +165,15 @@ struct SnapBuild
 	XLogRecPtr	start_decoding_at;
 
 	/*
-	 * LSN at which we found a consistent point at the time of slot creation.
-	 * This is also the point where we have exported a snapshot for the
-	 * initial copy.
+	 * LSN at which two-phase decoding was enabled or LSN at which we found a
+	 * consistent point at the time of slot creation.
 	 *
-	 * The prepared transactions that are not covered by initial snapshot
-	 * needs to be sent later along with commit prepared and they must be
-	 * before this point.
+	 * The prepared transactions, that were skipped because previously
+	 * two-phase was not enabled or are not covered by initial snapshot, need
+	 * to be sent later along with commit prepared and they must be before
+	 * this point.
 	 */
-	XLogRecPtr	initial_consistent_point;
+	XLogRecPtr	two_phase_at;
 
 	/*
 	 * Don't start decoding WAL until the "xl_running_xacts" information
@@ -281,7 +281,7 @@ AllocateSnapshotBuilder(ReorderBuffer *reorder,
 						TransactionId xmin_horizon,
 						XLogRecPtr start_lsn,
 						bool need_full_snapshot,
-						XLogRecPtr initial_consistent_point)
+						XLogRecPtr two_phase_at)
 {
 	MemoryContext context;
 	MemoryContext oldcontext;
@@ -309,7 +309,7 @@ AllocateSnapshotBuilder(ReorderBuffer *reorder,
 	builder->initial_xmin_horizon = xmin_horizon;
 	builder->start_decoding_at = start_lsn;
 	builder->building_full_snapshot = need_full_snapshot;
-	builder->initial_consistent_point = initial_consistent_point;
+	builder->two_phase_at = two_phase_at;
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -370,12 +370,21 @@ SnapBuildCurrentState(SnapBuild *builder)
 }
 
 /*
- * Return the LSN at which the snapshot was exported
+ * Return the LSN at which the two-phase decoding was first enabled.
  */
 XLogRecPtr
-SnapBuildInitialConsistentPoint(SnapBuild *builder)
+SnapBuildGetTwoPhaseAt(SnapBuild *builder)
 {
-	return builder->initial_consistent_point;
+	return builder->two_phase_at;
+}
+
+/*
+ * Set the LSN at which two-phase decoding is enabled.
+ */
+void
+SnapBuildSetTwoPhaseAt(SnapBuild *builder, XLogRecPtr ptr)
+{
+	builder->two_phase_at = ptr;
 }
 
 /*
@@ -673,6 +682,8 @@ SnapBuildGetOrBuildSnapshot(SnapBuild *builder, TransactionId xid)
 void
 SnapBuildClearExportedSnapshot(void)
 {
+	ResourceOwner tmpResOwner;
+
 	/* nothing exported, that is the usual case */
 	if (!ExportInProgress)
 		return;
@@ -680,10 +691,24 @@ SnapBuildClearExportedSnapshot(void)
 	if (!IsTransactionState())
 		elog(ERROR, "clearing exported snapshot in wrong transaction state");
 
-	/* make sure nothing  could have ever happened */
+	/*
+	 * AbortCurrentTransaction() takes care of resetting the snapshot state,
+	 * so remember SavedResourceOwnerDuringExport.
+	 */
+	tmpResOwner = SavedResourceOwnerDuringExport;
+
+	/* make sure nothing could have ever happened */
 	AbortCurrentTransaction();
 
-	CurrentResourceOwner = SavedResourceOwnerDuringExport;
+	CurrentResourceOwner = tmpResOwner;
+}
+
+/*
+ * Clear snapshot export state during transaction abort.
+ */
+void
+SnapBuildResetExportedSnapshotState(void)
+{
 	SavedResourceOwnerDuringExport = NULL;
 	ExportInProgress = false;
 }
@@ -1395,8 +1420,8 @@ SnapBuildWaitSnapshot(xl_running_xacts *running, TransactionId cutoff)
 	/*
 	 * All transactions we needed to finish finished - try to ensure there is
 	 * another xl_running_xacts record in a timely manner, without having to
-	 * wait for bgwriter or checkpointer to log one.  During recovery we
-	 * can't enforce that, so we'll have to wait.
+	 * wait for bgwriter or checkpointer to log one.  During recovery we can't
+	 * enforce that, so we'll have to wait.
 	 */
 	if (!RecoveryInProgress())
 	{
@@ -1413,7 +1438,6 @@ SnapBuildWaitSnapshot(xl_running_xacts *running, TransactionId cutoff)
  * We store current state of struct SnapBuild on disk in the following manner:
  *
  * struct SnapBuildOnDisk;
- * TransactionId * running.xcnt_space;
  * TransactionId * committed.xcnt; (*not xcnt_space*)
  *
  */
@@ -1541,7 +1565,7 @@ SnapBuildSerialize(SnapBuild *builder, XLogRecPtr lsn)
 	elog(DEBUG1, "serializing snapshot to %s", path);
 
 	/* to make sure only we will write to this tempfile, include pid */
-	sprintf(tmppath, "pg_logical/snapshots/%X-%X.snap.%u.tmp",
+	sprintf(tmppath, "pg_logical/snapshots/%X-%X.snap.%d.tmp",
 			LSN_FORMAT_ARGS(lsn), MyProcPid);
 
 	/*

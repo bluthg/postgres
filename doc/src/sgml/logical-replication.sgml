@@ -108,9 +108,9 @@
   <para>
    Publications are different from schemas and do not affect how the table is
    accessed.  Each table can be added to multiple publications if needed.
-   Publications may currently only contain tables.  Objects must be added
-   explicitly, except when a publication is created for <literal>ALL
-   TABLES</literal>.
+   Publications may currently only contain tables and all tables in schema.
+   Objects must be added explicitly, except when a publication is created for
+   <literal>ALL TABLES</literal>.
   </para>
 
   <para>
@@ -305,7 +305,7 @@
        using <command>ALTER SUBSCRIPTION</command> before attempting to drop
        the subscription.  If the remote database instance no longer exists, no
        further action is then necessary.  If, however, the remote database
-       instance is just unreachable, the replication slot (and any still 
+       instance is just unreachable, the replication slot (and any still
        remaining table synchronization slots) should then be
        dropped manually; otherwise it/they would continue to reserve WAL and might
        eventually cause the disk to fill up.  Such cases should be carefully
@@ -490,9 +490,9 @@
      any changes that happened during the initial data copy using standard
      logical replication.  During this synchronization phase, the changes
      are applied and committed in the same order as they happened on the
-     publisher.  Once the synchronization is done, the control of the
+     publisher.  Once synchronization is done, control of the
      replication of the table is given back to the main apply process where
-     the replication continues as normal.
+     replication continues as normal.
     </para>
   </sect2>
  </sect1>
@@ -534,7 +534,8 @@
    and <literal>TRIGGER</literal> privilege on such tables to roles that
    superusers trust.  Moreover, if untrusted users can create tables, use only
    publications that list tables explicitly.  That is to say, create a
-   subscription <literal>FOR ALL TABLES</literal> only when superusers trust
+   subscription <literal>FOR ALL TABLES</literal> or
+   <literal>FOR ALL TABLES IN SCHEMA</literal> only when superusers trust
    every user permitted to create a non-temp table on the publisher or the
    subscriber.
   </para>
@@ -564,8 +565,9 @@
 
   <para>
    To add tables to a publication, the user must have ownership rights on the
-   table.  To create a publication that publishes all tables automatically,
-   the user must be a superuser.
+   table. To add all tables in schema to a publication, the user must be a
+   superuser. To create a publication that publishes all tables or all tables in
+   schema automatically, the user must be a superuser.
   </para>
 
   <para>
@@ -602,10 +604,9 @@
   </para>
 
   <para>
-   The subscriber also requires the <varname>max_replication_slots</varname>
-   be set to configure how many replication origins can be tracked.  In this
-   case it should be set to at least the number of subscriptions that will be
-   added to the subscriber, plus some reserve for table synchronization.
+   <varname>max_replication_slots</varname> must also be set on the subscriber.
+   It should be set to at least the number of subscriptions that will be added
+   to the subscriber, plus some reserve for table synchronization.
    <varname>max_logical_replication_workers</varname> must be set to at least
    the number of subscriptions, again plus some reserve for the table
    synchronization.  Additionally the <varname>max_worker_processes</varname>

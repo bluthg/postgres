@@ -19,8 +19,8 @@
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/xact.h"
-#include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "access/xlogutils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
@@ -130,7 +130,7 @@ InitRecoveryTransactionEnvironment(void)
  *
  * This must be called even in shutdown of startup process if transaction
  * tracking has been initialized. Otherwise some locks the tracked
- * transactions were holding will not be released and and may interfere with
+ * transactions were holding will not be released and may interfere with
  * the processes still running (but will exit soon later) at the exit of
  * startup process.
  */
@@ -303,7 +303,7 @@ LogRecoveryConflict(ProcSignalReason reason, TimestampTz wait_start,
 	{
 		ereport(LOG,
 				errmsg("recovery still waiting after %ld.%03d ms: %s",
-					   msecs, usecs, _(get_recovery_conflict_desc(reason))),
+					   msecs, usecs, get_recovery_conflict_desc(reason)),
 				nprocs > 0 ? errdetail_log_plural("Conflicting process: %s.",
 												  "Conflicting processes: %s.",
 												  nprocs, buf.data) : 0);
@@ -312,7 +312,7 @@ LogRecoveryConflict(ProcSignalReason reason, TimestampTz wait_start,
 	{
 		ereport(LOG,
 				errmsg("recovery finished waiting after %ld.%03d ms: %s",
-					   msecs, usecs, _(get_recovery_conflict_desc(reason))));
+					   msecs, usecs, get_recovery_conflict_desc(reason)));
 	}
 
 	if (nprocs > 0)
@@ -482,7 +482,7 @@ ResolveRecoveryConflictWithSnapshotFullXid(FullTransactionId latestRemovedFullXi
 	 * snapshots that still see it.
 	 */
 	FullTransactionId nextXid = ReadNextFullTransactionId();
-	uint64			  diff;
+	uint64		diff;
 
 	diff = U64FromFullTransactionId(nextXid) -
 		U64FromFullTransactionId(latestRemovedFullXid);
@@ -986,9 +986,11 @@ StandbyAcquireAccessExclusiveLock(TransactionId xid, Oid dbOid, Oid relOid)
 static void
 StandbyReleaseLockList(List *locks)
 {
-	while (locks)
+	ListCell   *lc;
+
+	foreach(lc, locks)
 	{
-		xl_standby_lock *lock = (xl_standby_lock *) linitial(locks);
+		xl_standby_lock *lock = (xl_standby_lock *) lfirst(lc);
 		LOCKTAG		locktag;
 
 		elog(trace_recovery(DEBUG4),
@@ -1002,9 +1004,9 @@ StandbyReleaseLockList(List *locks)
 				 lock->xid, lock->dbOid, lock->relOid);
 			Assert(false);
 		}
-		pfree(lock);
-		locks = list_delete_first(locks);
 	}
+
+	list_free_deep(locks);
 }
 
 static void
@@ -1418,27 +1420,27 @@ LogStandbyInvalidations(int nmsgs, SharedInvalidationMessage *msgs,
 static const char *
 get_recovery_conflict_desc(ProcSignalReason reason)
 {
-	const char *reasonDesc = gettext_noop("unknown reason");
+	const char *reasonDesc = _("unknown reason");
 
 	switch (reason)
 	{
 		case PROCSIG_RECOVERY_CONFLICT_BUFFERPIN:
-			reasonDesc = gettext_noop("recovery conflict on buffer pin");
+			reasonDesc = _("recovery conflict on buffer pin");
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_LOCK:
-			reasonDesc = gettext_noop("recovery conflict on lock");
+			reasonDesc = _("recovery conflict on lock");
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_TABLESPACE:
-			reasonDesc = gettext_noop("recovery conflict on tablespace");
+			reasonDesc = _("recovery conflict on tablespace");
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_SNAPSHOT:
-			reasonDesc = gettext_noop("recovery conflict on snapshot");
+			reasonDesc = _("recovery conflict on snapshot");
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK:
-			reasonDesc = gettext_noop("recovery conflict on buffer deadlock");
+			reasonDesc = _("recovery conflict on buffer deadlock");
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_DATABASE:
-			reasonDesc = gettext_noop("recovery conflict on database");
+			reasonDesc = _("recovery conflict on database");
 			break;
 		default:
 			break;

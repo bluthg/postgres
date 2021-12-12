@@ -58,6 +58,23 @@ typedef enum _teSection
 	SECTION_POST_DATA			/* stuff to be processed after data */
 } teSection;
 
+/* We need one enum entry per prepared query in pg_dump */
+enum _dumpPreparedQueries
+{
+	PREPQUERY_DUMPAGG,
+	PREPQUERY_DUMPBASETYPE,
+	PREPQUERY_DUMPCOMPOSITETYPE,
+	PREPQUERY_DUMPDOMAIN,
+	PREPQUERY_DUMPENUMTYPE,
+	PREPQUERY_DUMPFUNC,
+	PREPQUERY_DUMPOPR,
+	PREPQUERY_DUMPRANGETYPE,
+	PREPQUERY_DUMPTABLEATTACH,
+	PREPQUERY_GETCOLUMNACLS,
+	PREPQUERY_GETDOMAINCONSTRAINTS,
+	NUM_PREP_QUERIES			/* must be last */
+};
+
 /* Parameters needed by ConnectDatabase; same for dump and restore */
 typedef struct _connParams
 {
@@ -180,7 +197,6 @@ typedef struct _dumpOptions
 
 	int			sequence_data;	/* dump sequence data even in schema-only mode */
 	int			do_nothing;
-	int			coll_unknown;
 } DumpOptions;
 
 /*
@@ -209,13 +225,14 @@ typedef struct Archive
 
 	/* other important stuff */
 	char	   *searchpath;		/* search_path to set during restore */
-	char	   *default_toast_compression;	/* default TOAST compression to
-											 * set during restore */
 	char	   *use_role;		/* Issue SET ROLE to this */
 
 	/* error handling */
 	bool		exit_on_error;	/* whether to exit on SQL errors... */
 	int			n_errors;		/* number of errors (if no die) */
+
+	/* prepared-query status */
+	bool	   *is_prepared;	/* indexed by enum _dumpPreparedQueries */
 
 	/* The rest is private */
 } Archive;
@@ -239,6 +256,7 @@ typedef struct Archive
 
 typedef struct
 {
+	/* Note: this struct must not contain any unused bytes */
 	Oid			tableoid;
 	Oid			oid;
 } CatalogId;

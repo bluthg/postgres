@@ -29,50 +29,6 @@
 #define SYNC_METHOD_OPEN_DSYNC	4	/* for O_DSYNC */
 extern int	sync_method;
 
-extern PGDLLIMPORT TimeLineID ThisTimeLineID;	/* current TLI */
-
-/*
- * Prior to 8.4, all activity during recovery was carried out by the startup
- * process. This local variable continues to be used in many parts of the
- * code to indicate actions taken by RecoveryManagers. Other processes that
- * potentially perform work during recovery should check RecoveryInProgress().
- * See XLogCtl notes in xlog.c.
- */
-extern bool InRecovery;
-
-/*
- * Like InRecovery, standbyState is only valid in the startup process.
- * In all other processes it will have the value STANDBY_DISABLED (so
- * InHotStandby will read as false).
- *
- * In DISABLED state, we're performing crash recovery or hot standby was
- * disabled in postgresql.conf.
- *
- * In INITIALIZED state, we've run InitRecoveryTransactionEnvironment, but
- * we haven't yet processed a RUNNING_XACTS or shutdown-checkpoint WAL record
- * to initialize our primary-transaction tracking system.
- *
- * When the transaction tracking is initialized, we enter the SNAPSHOT_PENDING
- * state. The tracked information might still be incomplete, so we can't allow
- * connections yet, but redo functions must update the in-memory state when
- * appropriate.
- *
- * In SNAPSHOT_READY mode, we have full knowledge of transactions that are
- * (or were) running on the primary at the current WAL location. Snapshots
- * can be taken, and read-only queries can be run.
- */
-typedef enum
-{
-	STANDBY_DISABLED,
-	STANDBY_INITIALIZED,
-	STANDBY_SNAPSHOT_PENDING,
-	STANDBY_SNAPSHOT_READY
-} HotStandbyState;
-
-extern HotStandbyState standbyState;
-
-#define InHotStandby (standbyState >= STANDBY_SNAPSHOT_PENDING)
-
 /*
  * Recovery target type.
  * Only set during a Point in Time recovery, not when in standby mode.
@@ -116,7 +72,7 @@ extern char *XLogArchiveCommand;
 extern bool EnableHotStandby;
 extern bool fullPageWrites;
 extern bool wal_log_hints;
-extern bool wal_compression;
+extern int	wal_compression;
 extern bool wal_init_zero;
 extern bool wal_recycle;
 extern bool *wal_consistency_checking;
@@ -166,6 +122,14 @@ typedef enum WalLevel
 	WAL_LEVEL_REPLICA,
 	WAL_LEVEL_LOGICAL
 } WalLevel;
+
+/* Compression algorithms for WAL */
+typedef enum WalCompression
+{
+	WAL_COMPRESSION_NONE = 0,
+	WAL_COMPRESSION_PGLZ,
+	WAL_COMPRESSION_LZ4
+} WalCompression;
 
 /* Recovery states */
 typedef enum RecoveryState
@@ -246,7 +210,6 @@ extern bool XLOG_DEBUG;
  */
 #define XLOG_INCLUDE_ORIGIN		0x01	/* include the replication origin */
 #define XLOG_MARK_UNIMPORTANT	0x02	/* record not important for durability */
-#define XLOG_INCLUDE_XID		0x04	/* include XID of top-level xact */
 
 
 /* Checkpoint statistics */
@@ -292,12 +255,13 @@ struct XLogRecData;
 extern XLogRecPtr XLogInsertRecord(struct XLogRecData *rdata,
 								   XLogRecPtr fpw_lsn,
 								   uint8 flags,
-								   int num_fpi);
+								   int num_fpi,
+								   bool topxid_included);
 extern void XLogFlush(XLogRecPtr RecPtr);
 extern bool XLogBackgroundFlush(void);
 extern bool XLogNeedsFlush(XLogRecPtr RecPtr);
-extern int	XLogFileInit(XLogSegNo segno, bool *use_existent, bool use_lock);
-extern int	XLogFileOpen(XLogSegNo segno);
+extern int	XLogFileInit(XLogSegNo segno, TimeLineID tli);
+extern int	XLogFileOpen(XLogSegNo segno, TimeLineID tli);
 
 extern void CheckXLogRemoved(XLogSegNo segno, TimeLineID tli);
 extern XLogSegNo XLogGetLastRemovedSegno(void);
@@ -308,7 +272,7 @@ extern void xlog_redo(XLogReaderState *record);
 extern void xlog_desc(StringInfo buf, XLogReaderState *record);
 extern const char *xlog_identify(uint8 info);
 
-extern void issue_xlog_fsync(int fd, XLogSegNo segno);
+extern void issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli);
 
 extern bool RecoveryInProgress(void);
 extern RecoveryState GetRecoveryState(void);
@@ -346,7 +310,8 @@ extern void UpdateFullPageWrites(void);
 extern void GetFullPageWriteInfo(XLogRecPtr *RedoRecPtr_p, bool *doPageWrites_p);
 extern XLogRecPtr GetRedoRecPtr(void);
 extern XLogRecPtr GetInsertRecPtr(void);
-extern XLogRecPtr GetFlushRecPtr(void);
+extern XLogRecPtr GetFlushRecPtr(TimeLineID *insertTLI);
+extern TimeLineID GetWALInsertionTimeLine(void);
 extern XLogRecPtr GetLastImportantRecPtr(void);
 extern void RemovePromoteSignalFiles(void);
 

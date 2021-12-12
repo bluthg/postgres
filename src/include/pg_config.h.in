@@ -1,17 +1,5 @@
 /* src/include/pg_config.h.in.  Generated from configure.ac by autoheader.  */
 
-/* Define to the type of arg 1 of 'accept' */
-#undef ACCEPT_TYPE_ARG1
-
-/* Define to the type of arg 2 of 'accept' */
-#undef ACCEPT_TYPE_ARG2
-
-/* Define to the type of arg 3 of 'accept' */
-#undef ACCEPT_TYPE_ARG3
-
-/* Define to the return type of 'accept' */
-#undef ACCEPT_TYPE_RETURN
-
 /* Define if building universal (internal helper macro) */
 #undef AC_APPLE_UNIVERSAL_BUILD
 
@@ -142,6 +130,14 @@
    don't. */
 #undef HAVE_DECL_POSIX_FADVISE
 
+/* Define to 1 if you have the declaration of `preadv', and to 0 if you don't.
+   */
+#undef HAVE_DECL_PREADV
+
+/* Define to 1 if you have the declaration of `pwritev', and to 0 if you
+   don't. */
+#undef HAVE_DECL_PWRITEV
+
 /* Define to 1 if you have the declaration of `RTLD_GLOBAL', and to 0 if you
    don't. */
 #undef HAVE_DECL_RTLD_GLOBAL
@@ -149,6 +145,10 @@
 /* Define to 1 if you have the declaration of `RTLD_NOW', and to 0 if you
    don't. */
 #undef HAVE_DECL_RTLD_NOW
+
+/* Define to 1 if you have the declaration of `sigwait', and to 0 if you
+   don't. */
+#undef HAVE_DECL_SIGWAIT
 
 /* Define to 1 if you have the declaration of `strlcat', and to 0 if you
    don't. */
@@ -322,9 +322,6 @@
 /* Define to 1 if you have the `ldap' library (-lldap). */
 #undef HAVE_LIBLDAP
 
-/* Define to 1 if you have the `ldap_r' library (-lldap_r). */
-#undef HAVE_LIBLDAP_R
-
 /* Define to 1 if you have the `lz4' library (-llz4). */
 #undef HAVE_LIBLZ4
 
@@ -409,6 +406,9 @@
 /* Define to 1 if you have the <poll.h> header file. */
 #undef HAVE_POLL_H
 
+/* Define to 1 if you have a POSIX-conforming sigwait declaration. */
+#undef HAVE_POSIX_DECL_SIGWAIT
+
 /* Define to 1 if you have the `posix_fadvise' function. */
 #undef HAVE_POSIX_FADVISE
 
@@ -423,9 +423,6 @@
 
 /* Define to 1 if you have the `pread' function. */
 #undef HAVE_PREAD
-
-/* Define to 1 if you have the `preadv' function. */
-#undef HAVE_PREADV
 
 /* Define to 1 if you have the `pstat' function. */
 #undef HAVE_PSTAT
@@ -447,12 +444,6 @@
 
 /* Define to 1 if you have the `pwrite' function. */
 #undef HAVE_PWRITE
-
-/* Define to 1 if you have the `pwritev' function. */
-#undef HAVE_PWRITEV
-
-/* Define to 1 if you have the `random' function. */
-#undef HAVE_RANDOM
 
 /* Define to 1 if you have the <readline.h> header file. */
 #undef HAVE_READLINE_H
@@ -494,6 +485,9 @@
 /* Define to 1 if you have the `rl_reset_screen_size' function. */
 #undef HAVE_RL_RESET_SCREEN_SIZE
 
+/* Define to 1 if you have the `rl_variable_bind' function. */
+#undef HAVE_RL_VARIABLE_BIND
+
 /* Define to 1 if you have the <security/pam_appl.h> header file. */
 #undef HAVE_SECURITY_PAM_APPL_H
 
@@ -512,11 +506,11 @@
 /* Define to 1 if you have the `shm_open' function. */
 #undef HAVE_SHM_OPEN
 
+/* Define to 1 if the system has the type `socklen_t'. */
+#undef HAVE_SOCKLEN_T
+
 /* Define to 1 if you have spinlocks. */
 #undef HAVE_SPINLOCKS
-
-/* Define to 1 if you have the `srandom' function. */
-#undef HAVE_SRANDOM
 
 /* Define to 1 if stdbool.h conforms to C99. */
 #undef HAVE_STDBOOL_H

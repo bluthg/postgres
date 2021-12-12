@@ -58,7 +58,6 @@ OBJS_COMMON = \
 	file_perm.o \
 	file_utils.o \
 	hashfn.o \
-	hex.o \
 	ip.o \
 	jsonapi.o \
 	keywords.o \
@@ -67,6 +66,7 @@ OBJS_COMMON = \
 	md5_common.o \
 	pg_get_line.o \
 	pg_lzcompress.o \
+	pg_prng.o \
 	pgfnames.o \
 	psprintf.o \
 	relpath.o \

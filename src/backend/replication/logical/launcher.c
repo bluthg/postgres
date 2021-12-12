@@ -67,12 +67,6 @@ typedef struct LogicalRepCtxStruct
 
 LogicalRepCtxStruct *LogicalRepCtx;
 
-typedef struct LogicalRepWorkerId
-{
-	Oid			subid;
-	Oid			relid;
-} LogicalRepWorkerId;
-
 static void ApplyLauncherWakeup(void);
 static void logicalrep_launcher_onexit(int code, Datum arg);
 static void logicalrep_worker_onexit(int code, Datum arg);
@@ -283,7 +277,7 @@ logicalrep_worker_launch(Oid dbid, Oid subid, const char *subname, Oid userid,
 
 	ereport(DEBUG1,
 			(errmsg_internal("starting logical replication worker for subscription \"%s\"",
-					subname)));
+							 subname)));
 
 	/* Report this after the initial starting message for consistency. */
 	if (max_replication_slots == 0)
@@ -385,6 +379,7 @@ retry:
 	worker->relid = relid;
 	worker->relstate = SUBREL_STATE_UNKNOWN;
 	worker->relstate_lsn = InvalidXLogRecPtr;
+	worker->stream_fileset = NULL;
 	worker->last_lsn = InvalidXLogRecPtr;
 	TIMESTAMP_NOBEGIN(worker->last_send_time);
 	TIMESTAMP_NOBEGIN(worker->last_recv_time);
@@ -649,10 +644,14 @@ static void
 logicalrep_worker_onexit(int code, Datum arg)
 {
 	/* Disconnect gracefully from the remote side. */
-	if (wrconn)
-		walrcv_disconnect(wrconn);
+	if (LogRepWorkerWalRcvConn)
+		walrcv_disconnect(LogRepWorkerWalRcvConn);
 
 	logicalrep_worker_detach();
+
+	/* Cleanup fileset used for streaming transactions. */
+	if (MyLogicalRepWorker->stream_fileset != NULL)
+		FileSetDeleteAll(MyLogicalRepWorker->stream_fileset);
 
 	ApplyLauncherWakeup();
 }

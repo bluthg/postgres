@@ -175,8 +175,8 @@ WaitEventSet *FeBeWaitSet;
 void
 pq_init(void)
 {
-	int		socket_pos PG_USED_FOR_ASSERTS_ONLY;
-	int		latch_pos PG_USED_FOR_ASSERTS_ONLY;
+	int			socket_pos PG_USED_FOR_ASSERTS_ONLY;
+	int			latch_pos PG_USED_FOR_ASSERTS_ONLY;
 
 	/* initialize state variables */
 	PqSendBufferSize = PQ_SEND_BUFFER_SIZE;
@@ -277,15 +277,30 @@ socket_close(int code, Datum arg)
 		secure_close(MyProcPort);
 
 		/*
-		 * Formerly we did an explicit close() here, but it seems better to
-		 * leave the socket open until the process dies.  This allows clients
-		 * to perform a "synchronous close" if they care --- wait till the
-		 * transport layer reports connection closure, and you can be sure the
-		 * backend has exited.
+		 * On most platforms, we leave the socket open until the process dies.
+		 * This allows clients to perform a "synchronous close" if they care
+		 * --- wait till the transport layer reports connection closure, and
+		 * you can be sure the backend has exited.  Saves a kernel call, too.
 		 *
-		 * We do set sock to PGINVALID_SOCKET to prevent any further I/O,
-		 * though.
+		 * However, that does not work on Windows: if the kernel closes the
+		 * socket it will invoke an "abortive shutdown" that discards any data
+		 * not yet sent to the client.  (This is a flat-out violation of the
+		 * TCP RFCs, but count on Microsoft not to care about that.)  To get
+		 * the spec-compliant "graceful shutdown" behavior, we must invoke
+		 * closesocket() explicitly.  When using OpenSSL, it seems that clean
+		 * shutdown also requires an explicit shutdown() call.
+		 *
+		 * This code runs late enough during process shutdown that we should
+		 * have finished all externally-visible shutdown activities, so that
+		 * in principle it's good enough to act as a synchronous close on
+		 * Windows too.  But it's a lot more fragile than the other way.
 		 */
+#ifdef WIN32
+		shutdown(MyProcPort->sock, SD_SEND);
+		closesocket(MyProcPort->sock);
+#endif
+
+		/* In any case, set sock to PGINVALID_SOCKET to prevent further I/O */
 		MyProcPort->sock = PGINVALID_SOCKET;
 	}
 }
@@ -485,8 +500,9 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 			{
 				ereport(LOG,
 						(errcode_for_socket_access(),
-				/* translator: first %s is IPv4, IPv6, or Unix */
-						 errmsg("setsockopt(SO_REUSEADDR) failed for %s address \"%s\": %m",
+				/* translator: third %s is IPv4, IPv6, or Unix */
+						 errmsg("%s(%s) failed for %s address \"%s\": %m",
+								"setsockopt", "SO_REUSEADDR",
 								familyDesc, addrDesc)));
 				closesocket(fd);
 				continue;
@@ -502,8 +518,9 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 			{
 				ereport(LOG,
 						(errcode_for_socket_access(),
-				/* translator: first %s is IPv4, IPv6, or Unix */
-						 errmsg("setsockopt(IPV6_V6ONLY) failed for %s address \"%s\": %m",
+				/* translator: third %s is IPv4, IPv6, or Unix */
+						 errmsg("%s(%s) failed for %s address \"%s\": %m",
+								"setsockopt", "IPV6_V6ONLY",
 								familyDesc, addrDesc)));
 				closesocket(fd);
 				continue;
@@ -741,7 +758,7 @@ StreamConnection(pgsocket server_fd, Port *port)
 					&port->laddr.salen) < 0)
 	{
 		ereport(LOG,
-				(errmsg("getsockname() failed: %m")));
+				(errmsg("%s() failed: %m", "getsockname")));
 		return STATUS_ERROR;
 	}
 
@@ -761,7 +778,7 @@ StreamConnection(pgsocket server_fd, Port *port)
 					   (char *) &on, sizeof(on)) < 0)
 		{
 			ereport(LOG,
-					(errmsg("setsockopt(%s) failed: %m", "TCP_NODELAY")));
+					(errmsg("%s(%s) failed: %m", "setsockopt", "TCP_NODELAY")));
 			return STATUS_ERROR;
 		}
 #endif
@@ -770,7 +787,7 @@ StreamConnection(pgsocket server_fd, Port *port)
 					   (char *) &on, sizeof(on)) < 0)
 		{
 			ereport(LOG,
-					(errmsg("setsockopt(%s) failed: %m", "SO_KEEPALIVE")));
+					(errmsg("%s(%s) failed: %m", "setsockopt", "SO_KEEPALIVE")));
 			return STATUS_ERROR;
 		}
 
@@ -802,7 +819,7 @@ StreamConnection(pgsocket server_fd, Port *port)
 					   &optlen) < 0)
 		{
 			ereport(LOG,
-					(errmsg("getsockopt(%s) failed: %m", "SO_SNDBUF")));
+					(errmsg("%s(%s) failed: %m", "getsockopt", "SO_SNDBUF")));
 			return STATUS_ERROR;
 		}
 		newopt = PQ_SEND_BUFFER_SIZE * 4;
@@ -812,7 +829,7 @@ StreamConnection(pgsocket server_fd, Port *port)
 						   sizeof(newopt)) < 0)
 			{
 				ereport(LOG,
-						(errmsg("setsockopt(%s) failed: %m", "SO_SNDBUF")));
+						(errmsg("%s(%s) failed: %m", "setsockopt", "SO_SNDBUF")));
 				return STATUS_ERROR;
 			}
 		}
@@ -1139,6 +1156,18 @@ pq_discardbytes(size_t len)
 	return 0;
 }
 
+/* --------------------------------
+ *		pq_buffer_has_data		- is any buffered data available to read?
+ *
+ * This will *not* attempt to read more data.
+ * --------------------------------
+ */
+bool
+pq_buffer_has_data(void)
+{
+	return (PqRecvPointer < PqRecvLength);
+}
+
 
 /* --------------------------------
  *		pq_startmsgread - begin reading a message from the client.
@@ -1201,7 +1230,7 @@ pq_is_reading_msg(void)
  *		is removed.  Also, s->cursor is initialized to zero for convenience
  *		in scanning the message contents.
  *
- *		If maxlen is not zero, it is an upper limit on the length of the
+ *		maxlen is the upper limit on the length of the
  *		message we are willing to accept.  We abort the connection (by
  *		returning EOF) if client tries to send more than that.
  *
@@ -1228,8 +1257,7 @@ pq_getmessage(StringInfo s, int maxlen)
 
 	len = pg_ntoh32(len);
 
-	if (len < 4 ||
-		(maxlen > 0 && len > maxlen))
+	if (len < 4 || len > maxlen)
 	{
 		ereport(COMMERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
@@ -1594,8 +1622,8 @@ pq_setkeepaliveswin32(Port *port, int idle, int interval)
 		!= 0)
 	{
 		ereport(LOG,
-				(errmsg("WSAIoctl(%s) failed: %ui",
-						"SIO_KEEPALIVE_VALS", WSAGetLastError())));
+				(errmsg("%s(%s) failed: error code %d",
+						"WSAIoctl", "SIO_KEEPALIVE_VALS", WSAGetLastError())));
 		return STATUS_ERROR;
 	}
 	if (port->keepalives_idle != idle)
@@ -1619,14 +1647,14 @@ pq_getkeepalivesidle(Port *port)
 	if (port->default_keepalives_idle == 0)
 	{
 #ifndef WIN32
-		ACCEPT_TYPE_ARG3 size = sizeof(port->default_keepalives_idle);
+		socklen_t	size = sizeof(port->default_keepalives_idle);
 
 		if (getsockopt(port->sock, IPPROTO_TCP, PG_TCP_KEEPALIVE_IDLE,
 					   (char *) &port->default_keepalives_idle,
 					   &size) < 0)
 		{
 			ereport(LOG,
-					(errmsg("getsockopt(%s) failed: %m", PG_TCP_KEEPALIVE_IDLE_STR)));
+					(errmsg("%s(%s) failed: %m", "getsockopt", PG_TCP_KEEPALIVE_IDLE_STR)));
 			port->default_keepalives_idle = -1; /* don't know */
 		}
 #else							/* WIN32 */
@@ -1671,7 +1699,7 @@ pq_setkeepalivesidle(int idle, Port *port)
 				   (char *) &idle, sizeof(idle)) < 0)
 	{
 		ereport(LOG,
-				(errmsg("setsockopt(%s) failed: %m", PG_TCP_KEEPALIVE_IDLE_STR)));
+				(errmsg("%s(%s) failed: %m", "setsockopt", PG_TCP_KEEPALIVE_IDLE_STR)));
 		return STATUS_ERROR;
 	}
 
@@ -1704,14 +1732,14 @@ pq_getkeepalivesinterval(Port *port)
 	if (port->default_keepalives_interval == 0)
 	{
 #ifndef WIN32
-		ACCEPT_TYPE_ARG3 size = sizeof(port->default_keepalives_interval);
+		socklen_t	size = sizeof(port->default_keepalives_interval);
 
 		if (getsockopt(port->sock, IPPROTO_TCP, TCP_KEEPINTVL,
 					   (char *) &port->default_keepalives_interval,
 					   &size) < 0)
 		{
 			ereport(LOG,
-					(errmsg("getsockopt(%s) failed: %m", "TCP_KEEPINTVL")));
+					(errmsg("%s(%s) failed: %m", "getsockopt", "TCP_KEEPINTVL")));
 			port->default_keepalives_interval = -1; /* don't know */
 		}
 #else
@@ -1755,7 +1783,7 @@ pq_setkeepalivesinterval(int interval, Port *port)
 				   (char *) &interval, sizeof(interval)) < 0)
 	{
 		ereport(LOG,
-				(errmsg("setsockopt(%s) failed: %m", "TCP_KEEPINTVL")));
+				(errmsg("%s(%s) failed: %m", "setsockopt", "TCP_KEEPINTVL")));
 		return STATUS_ERROR;
 	}
 
@@ -1767,7 +1795,7 @@ pq_setkeepalivesinterval(int interval, Port *port)
 	if (interval != 0)
 	{
 		ereport(LOG,
-				(errmsg("setsockopt(%s) not supported", "TCP_KEEPINTVL")));
+				(errmsg("%s(%s) not supported", "setsockopt", "TCP_KEEPINTVL")));
 		return STATUS_ERROR;
 	}
 #endif
@@ -1787,14 +1815,14 @@ pq_getkeepalivescount(Port *port)
 
 	if (port->default_keepalives_count == 0)
 	{
-		ACCEPT_TYPE_ARG3 size = sizeof(port->default_keepalives_count);
+		socklen_t	size = sizeof(port->default_keepalives_count);
 
 		if (getsockopt(port->sock, IPPROTO_TCP, TCP_KEEPCNT,
 					   (char *) &port->default_keepalives_count,
 					   &size) < 0)
 		{
 			ereport(LOG,
-					(errmsg("getsockopt(%s) failed: %m", "TCP_KEEPCNT")));
+					(errmsg("%s(%s) failed: %m", "getsockopt", "TCP_KEEPCNT")));
 			port->default_keepalives_count = -1;	/* don't know */
 		}
 	}
@@ -1833,7 +1861,7 @@ pq_setkeepalivescount(int count, Port *port)
 				   (char *) &count, sizeof(count)) < 0)
 	{
 		ereport(LOG,
-				(errmsg("setsockopt(%s) failed: %m", "TCP_KEEPCNT")));
+				(errmsg("%s(%s) failed: %m", "setsockopt", "TCP_KEEPCNT")));
 		return STATUS_ERROR;
 	}
 
@@ -1842,7 +1870,7 @@ pq_setkeepalivescount(int count, Port *port)
 	if (count != 0)
 	{
 		ereport(LOG,
-				(errmsg("setsockopt(%s) not supported", "TCP_KEEPCNT")));
+				(errmsg("%s(%s) not supported", "setsockopt", "TCP_KEEPCNT")));
 		return STATUS_ERROR;
 	}
 #endif
@@ -1862,14 +1890,14 @@ pq_gettcpusertimeout(Port *port)
 
 	if (port->default_tcp_user_timeout == 0)
 	{
-		ACCEPT_TYPE_ARG3 size = sizeof(port->default_tcp_user_timeout);
+		socklen_t	size = sizeof(port->default_tcp_user_timeout);
 
 		if (getsockopt(port->sock, IPPROTO_TCP, TCP_USER_TIMEOUT,
 					   (char *) &port->default_tcp_user_timeout,
 					   &size) < 0)
 		{
 			ereport(LOG,
-					(errmsg("getsockopt(%s) failed: %m", "TCP_USER_TIMEOUT")));
+					(errmsg("%s(%s) failed: %m", "getsockopt", "TCP_USER_TIMEOUT")));
 			port->default_tcp_user_timeout = -1;	/* don't know */
 		}
 	}
@@ -1908,7 +1936,7 @@ pq_settcpusertimeout(int timeout, Port *port)
 				   (char *) &timeout, sizeof(timeout)) < 0)
 	{
 		ereport(LOG,
-				(errmsg("setsockopt(%s) failed: %m", "TCP_USER_TIMEOUT")));
+				(errmsg("%s(%s) failed: %m", "setsockopt", "TCP_USER_TIMEOUT")));
 		return STATUS_ERROR;
 	}
 
@@ -1917,7 +1945,7 @@ pq_settcpusertimeout(int timeout, Port *port)
 	if (timeout != 0)
 	{
 		ereport(LOG,
-				(errmsg("setsockopt(%s) not supported", "TCP_USER_TIMEOUT")));
+				(errmsg("%s(%s) not supported", "setsockopt", "TCP_USER_TIMEOUT")));
 		return STATUS_ERROR;
 	}
 #endif

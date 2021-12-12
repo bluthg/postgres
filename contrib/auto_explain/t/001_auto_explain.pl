@@ -1,11 +1,14 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 4;
 
-my $node = get_new_node('main');
+my $node = PostgreSQL::Test::Cluster->new('main');
 $node->init;
 $node->append_conf('postgresql.conf',
 	"shared_preload_libraries = 'auto_explain'");

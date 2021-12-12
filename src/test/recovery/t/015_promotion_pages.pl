@@ -1,15 +1,18 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # Test for promotion handling with WAL records generated post-promotion
 # before the first checkpoint is generated.  This test case checks for
 # invalid page references at replay based on the minimum consistent
 # recovery point defined.
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 1;
 
 # Initialize primary node
-my $alpha = get_new_node('alpha');
+my $alpha = PostgreSQL::Test::Cluster->new('alpha');
 $alpha->init(allows_streaming => 1);
 # Setting wal_log_hints to off is important to get invalid page
 # references.
@@ -22,7 +25,7 @@ $alpha->start;
 
 # setup/start a standby
 $alpha->backup('bkp');
-my $bravo = get_new_node('bravo');
+my $bravo = PostgreSQL::Test::Cluster->new('bravo');
 $bravo->init_from_backup($alpha, 'bkp', has_streaming => 1);
 $bravo->append_conf('postgresql.conf', <<EOF);
 checkpoint_timeout=1h

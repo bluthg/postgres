@@ -327,9 +327,11 @@ BackgroundWorkerStateChange(bool allow_new_workers)
 			notify_pid = slot->worker.bgw_notify_pid;
 			if ((slot->worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0)
 				BackgroundWorkerData->parallel_terminate_count++;
-			pg_memory_barrier();
 			slot->pid = 0;
+
+			pg_memory_barrier();
 			slot->in_use = false;
+
 			if (notify_pid != 0)
 				kill(notify_pid, SIGUSR1);
 
@@ -387,7 +389,7 @@ BackgroundWorkerStateChange(bool allow_new_workers)
 		rw->rw_worker.bgw_notify_pid = slot->worker.bgw_notify_pid;
 		if (!PostmasterMarkPIDForWorkerNotify(rw->rw_worker.bgw_notify_pid))
 		{
-			elog(DEBUG1, "worker notification PID %lu is not valid",
+			elog(DEBUG1, "worker notification PID %ld is not valid",
 				 (long) rw->rw_worker.bgw_notify_pid);
 			rw->rw_worker.bgw_notify_pid = 0;
 		}
@@ -403,7 +405,7 @@ BackgroundWorkerStateChange(bool allow_new_workers)
 		/* Log it! */
 		ereport(DEBUG1,
 				(errmsg_internal("registering background worker \"%s\"",
-						rw->rw_worker.bgw_name)));
+								 rw->rw_worker.bgw_name)));
 
 		slist_push_head(&BackgroundWorkerList, &rw->rw_lnode);
 	}
@@ -415,6 +417,8 @@ BackgroundWorkerStateChange(bool allow_new_workers)
  * The worker must be identified by passing an slist_mutable_iter that
  * points to it.  This convention allows deletion of workers during
  * searches of the worker list, and saves having to search the list again.
+ *
+ * Caller is responsible for notifying bgw_notify_pid, if appropriate.
  *
  * This function must be invoked only in the postmaster.
  */
@@ -428,14 +432,21 @@ ForgetBackgroundWorker(slist_mutable_iter *cur)
 
 	Assert(rw->rw_shmem_slot < max_worker_processes);
 	slot = &BackgroundWorkerData->slot[rw->rw_shmem_slot];
+	Assert(slot->in_use);
+
+	/*
+	 * We need a memory barrier here to make sure that the update of
+	 * parallel_terminate_count completes before the store to in_use.
+	 */
 	if ((rw->rw_worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0)
 		BackgroundWorkerData->parallel_terminate_count++;
 
+	pg_memory_barrier();
 	slot->in_use = false;
 
 	ereport(DEBUG1,
 			(errmsg_internal("unregistering background worker \"%s\"",
-					rw->rw_worker.bgw_name)));
+							 rw->rw_worker.bgw_name)));
 
 	slist_delete_current(cur);
 	free(rw);
@@ -641,17 +652,24 @@ static bool
 SanityCheckBackgroundWorker(BackgroundWorker *worker, int elevel)
 {
 	/* sanity check for flags */
+
+	/*
+	 * We used to support workers not connected to shared memory, but don't
+	 * anymore. Thus this is a required flag now. We're not removing the flag
+	 * for compatibility reasons and because the flag still provides some
+	 * signal when reading code.
+	 */
+	if (!(worker->bgw_flags & BGWORKER_SHMEM_ACCESS))
+	{
+		ereport(elevel,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("background worker \"%s\": background worker without shared memory access are not supported",
+						worker->bgw_name)));
+		return false;
+	}
+
 	if (worker->bgw_flags & BGWORKER_BACKEND_DATABASE_CONNECTION)
 	{
-		if (!(worker->bgw_flags & BGWORKER_SHMEM_ACCESS))
-		{
-			ereport(elevel,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("background worker \"%s\": must attach to shared memory in order to request a database connection",
-							worker->bgw_name)));
-			return false;
-		}
-
 		if (worker->bgw_start_time == BgWorkerStart_PostmasterStart)
 		{
 			ereport(elevel,
@@ -734,20 +752,6 @@ StartBackgroundWorker(void)
 	MyBackendType = B_BG_WORKER;
 	init_ps_display(worker->bgw_name);
 
-	/*
-	 * If we're not supposed to have shared memory access, then detach from
-	 * shared memory.  If we didn't request shared memory access, the
-	 * postmaster won't force a cluster-wide restart if we exit unexpectedly,
-	 * so we'd better make sure that we don't mess anything up that would
-	 * require that sort of cleanup.
-	 */
-	if ((worker->bgw_flags & BGWORKER_SHMEM_ACCESS) == 0)
-	{
-		ShutdownLatchSupport();
-		dsm_detach_all();
-		PGSharedMemoryDetach();
-	}
-
 	SetProcessingMode(InitProcessing);
 
 	/* Apply PostAuthDelay */
@@ -821,29 +825,19 @@ StartBackgroundWorker(void)
 	PG_exception_stack = &local_sigjmp_buf;
 
 	/*
-	 * If the background worker request shared memory access, set that up now;
-	 * else, detach all shared memory segments.
+	 * Create a per-backend PGPROC struct in shared memory, except in the
+	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must
+	 * do this before we can use LWLocks (and in the EXEC_BACKEND case we
+	 * already had to do some stuff with LWLocks).
 	 */
-	if (worker->bgw_flags & BGWORKER_SHMEM_ACCESS)
-	{
-		/*
-		 * Early initialization.  Some of this could be useful even for
-		 * background workers that aren't using shared memory, but they can
-		 * call the individual startup routines for those subsystems if
-		 * needed.
-		 */
-		BaseInit();
-
-		/*
-		 * Create a per-backend PGPROC struct in shared memory, except in the
-		 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must
-		 * do this before we can use LWLocks (and in the EXEC_BACKEND case we
-		 * already had to do some stuff with LWLocks).
-		 */
 #ifndef EXEC_BACKEND
-		InitProcess();
+	InitProcess();
 #endif
-	}
+
+	/*
+	 * Early initialization.
+	 */
+	BaseInit();
 
 	/*
 	 * Look up the entry point function, loading its library if necessary.

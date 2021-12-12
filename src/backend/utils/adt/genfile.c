@@ -29,6 +29,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "postmaster/syslogger.h"
+#include "replication/slot.h"
 #include "storage/fd.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -160,16 +161,15 @@ read_binary_file(const char *filename, int64 seek_offset, int64 bytes_to_read,
 #define MIN_READ_SIZE 4096
 
 			/*
-			 * If not at end of file, and sbuf.len is equal to
-			 * MaxAllocSize - 1, then either the file is too large, or
-			 * there is nothing left to read. Attempt to read one more
-			 * byte to see if the end of file has been reached. If not,
-			 * the file is too large; we'd rather give the error message
-			 * for that ourselves.
+			 * If not at end of file, and sbuf.len is equal to MaxAllocSize -
+			 * 1, then either the file is too large, or there is nothing left
+			 * to read. Attempt to read one more byte to see if the end of
+			 * file has been reached. If not, the file is too large; we'd
+			 * rather give the error message for that ourselves.
 			 */
 			if (sbuf.len == MaxAllocSize - 1)
 			{
-				char	rbuf[1];
+				char		rbuf[1];
 
 				if (fread(rbuf, 1, 1, file) != 0 || !feof(file))
 					ereport(ERROR,
@@ -720,4 +720,47 @@ Datum
 pg_ls_archive_statusdir(PG_FUNCTION_ARGS)
 {
 	return pg_ls_dir_files(fcinfo, XLOGDIR "/archive_status", true);
+}
+
+/*
+ * Function to return the list of files in the pg_logical/snapshots directory.
+ */
+Datum
+pg_ls_logicalsnapdir(PG_FUNCTION_ARGS)
+{
+	return pg_ls_dir_files(fcinfo, "pg_logical/snapshots", false);
+}
+
+/*
+ * Function to return the list of files in the pg_logical/mappings directory.
+ */
+Datum
+pg_ls_logicalmapdir(PG_FUNCTION_ARGS)
+{
+	return pg_ls_dir_files(fcinfo, "pg_logical/mappings", false);
+}
+
+/*
+ * Function to return the list of files in the pg_replslot/<replication_slot>
+ * directory.
+ */
+Datum
+pg_ls_replslotdir(PG_FUNCTION_ARGS)
+{
+	text	   *slotname_t;
+	char		path[MAXPGPATH];
+	char	   *slotname;
+
+	slotname_t = PG_GETARG_TEXT_PP(0);
+
+	slotname = text_to_cstring(slotname_t);
+
+	if (!SearchNamedReplicationSlot(slotname, true))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("replication slot \"%s\" does not exist",
+						slotname)));
+
+	snprintf(path, sizeof(path), "pg_replslot/%s", slotname);
+	return pg_ls_dir_files(fcinfo, path, false);
 }

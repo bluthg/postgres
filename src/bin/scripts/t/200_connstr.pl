@@ -1,8 +1,11 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 3;
 
 # Tests to check connection string handling in utilities
@@ -20,7 +23,7 @@ my $dbname2 =
 my $dbname3 = generate_ascii_string(130, 192);
 my $dbname4 = generate_ascii_string(193, 255);
 
-my $node = get_new_node('main');
+my $node = PostgreSQL::Test::Cluster->new('main');
 $node->init(extra => [ '--locale=C', '--encoding=LATIN1' ]);
 $node->start;
 

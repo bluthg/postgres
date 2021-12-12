@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * option.c
- *		  FDW option handling for postgres_fdw
+ *		  FDW and GUC option handling for postgres_fdw
  *
  * Portions Copyright (c) 2012-2021, PostgreSQL Global Development Group
  *
@@ -20,6 +20,7 @@
 #include "commands/extension.h"
 #include "postgres_fdw.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/varlena.h"
 
 /*
@@ -43,6 +44,13 @@ static PgFdwOption *postgres_fdw_options;
  * Allocated and filled in InitPgFdwOptions.
  */
 static PQconninfoOption *libpq_options;
+
+/*
+ * GUC parameters
+ */
+char	   *pgfdw_application_name = NULL;
+
+void		_PG_init(void);
 
 /*
  * Helper functions
@@ -99,8 +107,10 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 					 errmsg("invalid option \"%s\"", def->defname),
-					 errhint("Valid options in this context are: %s",
-							 buf.data)));
+					 buf.len > 0
+					 ? errhint("Valid options in this context are: %s",
+							   buf.data)
+					 : errhint("There are no valid options in this context.")));
 		}
 
 		/*
@@ -108,6 +118,7 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 		 */
 		if (strcmp(def->defname, "use_remote_estimate") == 0 ||
 			strcmp(def->defname, "updatable") == 0 ||
+			strcmp(def->defname, "truncatable") == 0 ||
 			strcmp(def->defname, "async_capable") == 0 ||
 			strcmp(def->defname, "keep_connections") == 0)
 		{
@@ -117,15 +128,27 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 		else if (strcmp(def->defname, "fdw_startup_cost") == 0 ||
 				 strcmp(def->defname, "fdw_tuple_cost") == 0)
 		{
-			/* these must have a non-negative numeric value */
-			double		val;
-			char	   *endp;
+			/*
+			 * These must have a floating point value greater than or equal to
+			 * zero.
+			 */
+			char	   *value;
+			double		real_val;
+			bool		is_parsed;
 
-			val = strtod(defGetString(def), &endp);
-			if (*endp || val < 0)
+			value = defGetString(def);
+			is_parsed = parse_real(value, &real_val, 0, NULL);
+
+			if (!is_parsed)
 				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("%s requires a non-negative numeric value",
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid value for floating point option \"%s\": %s",
+								def->defname, value)));
+
+			if (real_val < 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("\"%s\" must be a floating point value greater than or equal to zero",
 								def->defname)));
 		}
 		else if (strcmp(def->defname, "extensions") == 0)
@@ -133,26 +156,26 @@ postgres_fdw_validator(PG_FUNCTION_ARGS)
 			/* check list syntax, warn about uninstalled extensions */
 			(void) ExtractExtensionList(defGetString(def), true);
 		}
-		else if (strcmp(def->defname, "fetch_size") == 0)
+		else if (strcmp(def->defname, "fetch_size") == 0 ||
+				 strcmp(def->defname, "batch_size") == 0)
 		{
-			int			fetch_size;
+			char	   *value;
+			int			int_val;
+			bool		is_parsed;
 
-			fetch_size = strtol(defGetString(def), NULL, 10);
-			if (fetch_size <= 0)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("%s requires a non-negative integer value",
-								def->defname)));
-		}
-		else if (strcmp(def->defname, "batch_size") == 0)
-		{
-			int			batch_size;
+			value = defGetString(def);
+			is_parsed = parse_int(value, &int_val, 0, NULL);
 
-			batch_size = strtol(defGetString(def), NULL, 10);
-			if (batch_size <= 0)
+			if (!is_parsed)
 				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("%s requires a non-negative integer value",
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid value for integer option \"%s\": %s",
+								def->defname, value)));
+
+			if (int_val <= 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("\"%s\" must be an integer value greater than zero",
 								def->defname)));
 		}
 		else if (strcmp(def->defname, "password_required") == 0)
@@ -213,6 +236,9 @@ InitPgFdwOptions(void)
 		/* updatable is available on both server and table */
 		{"updatable", ForeignServerRelationId, false},
 		{"updatable", ForeignTableRelationId, false},
+		/* truncatable is available on both server and table */
+		{"truncatable", ForeignServerRelationId, false},
+		{"truncatable", ForeignTableRelationId, false},
 		/* fetch_size is available on both server and table */
 		{"fetch_size", ForeignServerRelationId, false},
 		{"fetch_size", ForeignTableRelationId, false},
@@ -417,4 +443,30 @@ ExtractExtensionList(const char *extensionsString, bool warnOnMissing)
 
 	list_free(extlist);
 	return extensionOids;
+}
+
+/*
+ * Module load callback
+ */
+void
+_PG_init(void)
+{
+	/*
+	 * Unlike application_name GUC, don't set GUC_IS_NAME flag nor check_hook
+	 * to allow postgres_fdw.application_name to be any string more than
+	 * NAMEDATALEN characters and to include non-ASCII characters. Instead,
+	 * remote server truncates application_name of remote connection to less
+	 * than NAMEDATALEN and replaces any non-ASCII characters in it with a '?'
+	 * character.
+	 */
+	DefineCustomStringVariable("postgres_fdw.application_name",
+							   "Sets the application name to be used on the remote server.",
+							   NULL,
+							   &pgfdw_application_name,
+							   NULL,
+							   PGC_USERSET,
+							   0,
+							   NULL,
+							   NULL,
+							   NULL);
 }

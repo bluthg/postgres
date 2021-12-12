@@ -95,10 +95,10 @@
 
 #include "access/transam.h"
 #include "access/xlog.h"
-#include "bootstrap/bootstrap.h"
 #include "catalog/pg_control.h"
 #include "common/file_perm.h"
 #include "common/ip.h"
+#include "common/pg_prng.h"
 #include "common/string.h"
 #include "lib/ilist.h"
 #include "libpq/auth.h"
@@ -109,6 +109,7 @@
 #include "pgstat.h"
 #include "port/pg_bswap.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/auxprocess.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/interrupt.h"
@@ -128,6 +129,7 @@
 #include "utils/memutils.h"
 #include "utils/pidfile.h"
 #include "utils/ps_status.h"
+#include "utils/queryjumble.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
@@ -521,6 +523,7 @@ typedef struct
 	pg_time_t	first_syslogger_file_time;
 	bool		redirection_done;
 	bool		IsBinaryUpgrade;
+	bool		query_id_enabled;
 	int			max_safe_fds;
 	int			MaxBackends;
 #ifdef WIN32
@@ -592,6 +595,13 @@ PostmasterMain(int argc, char *argv[])
 	IsPostmasterEnvironment = true;
 
 	/*
+	 * Start our win32 signal implementation
+	 */
+#ifdef WIN32
+	pgwin32_signal_initialize();
+#endif
+
+	/*
 	 * We should not be creating any files or directories before we check the
 	 * data directory (see checkDataDir()), but just in case set the umask to
 	 * the most restrictive (owner-only) permissions.
@@ -660,6 +670,12 @@ PostmasterMain(int argc, char *argv[])
 	pqsignal_pm(SIGCHLD, reaper);	/* handle child termination */
 
 #ifdef SIGURG
+
+	/*
+	 * Ignore SIGURG for now.  Child processes may change this (see
+	 * InitializeLatchSupport), but they will not receive any such signals
+	 * until they wait on a latch.
+	 */
 	pqsignal_pm(SIGURG, SIG_IGN);	/* ignored */
 #endif
 
@@ -881,15 +897,31 @@ PostmasterMain(int argc, char *argv[])
 	if (output_config_variable != NULL)
 	{
 		/*
-		 * "-C guc" was specified, so print GUC's value and exit.  No extra
-		 * permission check is needed because the user is reading inside the
-		 * data dir.
+		 * If this is a runtime-computed GUC, it hasn't yet been initialized,
+		 * and the present value is not useful.  However, this is a convenient
+		 * place to print the value for most GUCs because it is safe to run
+		 * postmaster startup to this point even if the server is already
+		 * running.  For the handful of runtime-computed GUCs that we cannot
+		 * provide meaningful values for yet, we wait until later in
+		 * postmaster startup to print the value.  We won't be able to use -C
+		 * on running servers for those GUCs, but using this option now would
+		 * lead to incorrect results for them.
 		 */
-		const char *config_val = GetConfigOption(output_config_variable,
-												 false, false);
+		int			flags = GetConfigOptionFlags(output_config_variable, true);
 
-		puts(config_val ? config_val : "");
-		ExitPostmaster(0);
+		if ((flags & GUC_RUNTIME_COMPUTED) == 0)
+		{
+			/*
+			 * "-C guc" was specified, so print GUC's value and exit.  No
+			 * extra permission check is needed because the user is reading
+			 * inside the data dir.
+			 */
+			const char *config_val = GetConfigOption(output_config_variable,
+													 false, false);
+
+			puts(config_val ? config_val : "");
+			ExitPostmaster(0);
+		}
 	}
 
 	/* Verify that DataDir looks reasonable */
@@ -1010,6 +1042,33 @@ PostmasterMain(int argc, char *argv[])
 	 * workers, calculate MaxBackends.
 	 */
 	InitializeMaxBackends();
+
+	/*
+	 * Now that loadable modules have had their chance to request additional
+	 * shared memory, determine the value of any runtime-computed GUCs that
+	 * depend on the amount of shared memory required.
+	 */
+	InitializeShmemGUCs();
+
+	/*
+	 * If -C was specified with a runtime-computed GUC, we held off printing
+	 * the value earlier, as the GUC was not yet initialized.  We handle -C
+	 * for most GUCs before we lock the data directory so that the option may
+	 * be used on a running server.  However, a handful of GUCs are runtime-
+	 * computed and do not have meaningful values until after locking the data
+	 * directory, and we cannot safely calculate their values earlier on a
+	 * running server.  At this point, such GUCs should be properly
+	 * initialized, and we haven't yet set up shared memory, so this is a good
+	 * time to handle the -C option for these special GUCs.
+	 */
+	if (output_config_variable != NULL)
+	{
+		const char *config_val = GetConfigOption(output_config_variable,
+												 false, false);
+
+		puts(config_val ? config_val : "");
+		ExitPostmaster(0);
+	}
 
 	/*
 	 * Set up shared memory and semaphores.
@@ -1395,6 +1454,12 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_STARTING);
 
+	/* Start bgwriter and checkpointer so they can help with recovery */
+	if (CheckpointerPID == 0)
+		CheckpointerPID = StartCheckpointer();
+	if (BgWriterPID == 0)
+		BgWriterPID = StartBackgroundWriter();
+
 	/*
 	 * We're ready to rock and roll...
 	 */
@@ -1757,7 +1822,7 @@ ServerLoop(void)
 		 * fails, we'll just try again later.  Likewise for the checkpointer.
 		 */
 		if (pmState == PM_RUN || pmState == PM_RECOVERY ||
-			pmState == PM_HOT_STANDBY)
+			pmState == PM_HOT_STANDBY || pmState == PM_STARTUP)
 		{
 			if (CheckpointerPID == 0)
 				CheckpointerPID = StartCheckpointer();
@@ -2047,6 +2112,18 @@ retry1:
 #endif
 
 		/*
+		 * At this point we should have no data already buffered.  If we do,
+		 * it was received before we performed the SSL handshake, so it wasn't
+		 * encrypted and indeed may have been injected by a man-in-the-middle.
+		 * We report this case to the client.
+		 */
+		if (pq_buffer_has_data())
+			ereport(FATAL,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("received unencrypted data after SSL request"),
+					 errdetail("This could be either a client-software bug or evidence of an attempted man-in-the-middle attack.")));
+
+		/*
 		 * regular startup packet, cancel, etc packet should follow, but not
 		 * another SSL negotiation request, and a GSS request should only
 		 * follow if SSL was rejected (client may negotiate in either order)
@@ -2077,6 +2154,18 @@ retry1:
 		if (GSSok == 'G' && secure_open_gssapi(port) == -1)
 			return STATUS_ERROR;
 #endif
+
+		/*
+		 * At this point we should have no data already buffered.  If we do,
+		 * it was received before we performed the GSS handshake, so it wasn't
+		 * encrypted and indeed may have been injected by a man-in-the-middle.
+		 * We report this case to the client.
+		 */
+		if (pq_buffer_has_data())
+			ereport(FATAL,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("received unencrypted data after GSSAPI encryption request"),
+					 errdetail("This could be either a client-software bug or evidence of an attempted man-in-the-middle attack.")));
 
 		/*
 		 * regular startup packet, cancel, etc packet should follow, but not
@@ -2611,19 +2700,19 @@ ClosePostmasterPorts(bool am_syslogger)
 void
 InitProcessGlobals(void)
 {
-	unsigned int rseed;
-
 	MyProcPid = getpid();
 	MyStartTimestamp = GetCurrentTimestamp();
 	MyStartTime = timestamptz_to_time_t(MyStartTimestamp);
 
 	/*
-	 * Set a different seed for random() in every process.  We want something
+	 * Set a different global seed in every process.  We want something
 	 * unpredictable, so if possible, use high-quality random bits for the
 	 * seed.  Otherwise, fall back to a seed based on timestamp and PID.
 	 */
-	if (!pg_strong_random(&rseed, sizeof(rseed)))
+	if (unlikely(!pg_prng_strong_seed(&pg_global_prng_state)))
 	{
+		uint64		rseed;
+
 		/*
 		 * Since PIDs and timestamps tend to change more frequently in their
 		 * least significant bits, shift the timestamp left to allow a larger
@@ -2634,8 +2723,17 @@ InitProcessGlobals(void)
 		rseed = ((uint64) MyProcPid) ^
 			((uint64) MyStartTimestamp << 12) ^
 			((uint64) MyStartTimestamp >> 20);
+
+		pg_prng_seed(&pg_global_prng_state, rseed);
 	}
-	srandom(rseed);
+
+	/*
+	 * Also make sure that we've set a good seed for random(3).  Use of that
+	 * is deprecated in core Postgres, but extensions might use it.
+	 */
+#ifndef WIN32
+	srandom(pg_prng_uint32(&pg_global_prng_state));
+#endif
 }
 
 
@@ -3281,26 +3379,21 @@ CleanupBackgroundWorker(int pid,
 		}
 
 		/*
-		 * Additionally, for shared-memory-connected workers, just like a
-		 * backend, any exit status other than 0 or 1 is considered a crash
-		 * and causes a system-wide restart.
+		 * Additionally, just like a backend, any exit status other than 0 or
+		 * 1 is considered a crash and causes a system-wide restart.
 		 */
-		if ((rw->rw_worker.bgw_flags & BGWORKER_SHMEM_ACCESS) != 0)
+		if (!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus))
 		{
-			if (!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus))
-			{
-				HandleChildCrash(pid, exitstatus, namebuf);
-				return true;
-			}
+			HandleChildCrash(pid, exitstatus, namebuf);
+			return true;
 		}
 
 		/*
-		 * We must release the postmaster child slot whether this worker is
-		 * connected to shared memory or not, but we only treat it as a crash
-		 * if it is in fact connected.
+		 * We must release the postmaster child slot. If the worker failed to
+		 * do so, it did not clean up after itself, requiring a crash-restart
+		 * cycle.
 		 */
-		if (!ReleasePostmasterChildSlot(rw->rw_child_slot) &&
-			(rw->rw_worker.bgw_flags & BGWORKER_SHMEM_ACCESS) != 0)
+		if (!ReleasePostmasterChildSlot(rw->rw_child_slot))
 		{
 			HandleChildCrash(pid, exitstatus, namebuf);
 			return true;
@@ -3926,7 +4019,6 @@ PostmasterStateMachine(void)
 			Assert(CheckpointerPID == 0);
 			Assert(WalWriterPID == 0);
 			Assert(AutoVacPID == 0);
-			Assert(PgArchPID == 0);
 			/* syslogger is not considered here */
 			pmState = PM_NO_CHILDREN;
 		}
@@ -3965,7 +4057,11 @@ PostmasterStateMachine(void)
 			if (ReachedNormalRunning)
 				CancelBackup();
 
-			/* Normal exit from the postmaster is here */
+			/*
+			 * Normal exit from the postmaster is here.  We don't need to log
+			 * anything here, since the UnlinkLockFiles proc_exit callback
+			 * will do so, and that should be the last user-visible action.
+			 */
 			ExitPostmaster(0);
 		}
 	}
@@ -3977,9 +4073,21 @@ PostmasterStateMachine(void)
 	 * startup process fails, because more than likely it will just fail again
 	 * and we will keep trying forever.
 	 */
-	if (pmState == PM_NO_CHILDREN &&
-		(StartupStatus == STARTUP_CRASHED || !restart_after_crash))
-		ExitPostmaster(1);
+	if (pmState == PM_NO_CHILDREN)
+	{
+		if (StartupStatus == STARTUP_CRASHED)
+		{
+			ereport(LOG,
+					(errmsg("shutting down due to startup process failure")));
+			ExitPostmaster(1);
+		}
+		if (!restart_after_crash)
+		{
+			ereport(LOG,
+					(errmsg("shutting down because restart_after_crash is off")));
+			ExitPostmaster(1);
+		}
+	}
 
 	/*
 	 * If we need to recover from a crash, wait for all non-syslogger children
@@ -4200,6 +4308,15 @@ BackendStartup(Port *port)
 
 		/* Perform additional initialization and collect startup packet */
 		BackendInitialize(port);
+
+		/*
+		 * Create a per-backend PGPROC struct in shared memory. We must do
+		 * this before we can use LWLocks. In the !EXEC_BACKEND case (here)
+		 * this could be delayed a bit further, but EXEC_BACKEND needs to do
+		 * stuff with LWLocks before PostgresMain(), so we do it here as well
+		 * for symmetry.
+		 */
+		InitProcess();
 
 		/* And run the backend */
 		BackendRun(port);
@@ -4468,19 +4585,13 @@ BackendInitialize(Port *port)
 static void
 BackendRun(Port *port)
 {
-	char	   *av[2];
-	const int	ac = 1;
-
-	av[0] = "postgres";
-	av[1] = NULL;
-
 	/*
 	 * Make sure we aren't in PostmasterContext anymore.  (We can't delete it
 	 * just yet, though, because InitPostgres will need the HBA data.)
 	 */
 	MemoryContextSwitchTo(TopMemoryContext);
 
-	PostgresMain(ac, av, port->database_name, port->user_name);
+	PostgresMain(port->database_name, port->user_name);
 }
 
 
@@ -4876,15 +4987,6 @@ SubPostmasterMain(int argc, char *argv[])
 	/* Close the postmaster's sockets (as soon as we know them) */
 	ClosePostmasterPorts(strcmp(argv[1], "--forklog") == 0);
 
-	/*
-	 * Start our win32 signal implementation. This has to be done after we
-	 * read the backend variables, because we need to pick up the signal pipe
-	 * from the parent process.
-	 */
-#ifdef WIN32
-	pgwin32_signal_initialize();
-#endif
-
 	/* Setup as postmaster child */
 	InitPostmasterChild();
 
@@ -4907,7 +5009,7 @@ SubPostmasterMain(int argc, char *argv[])
 	if (strcmp(argv[1], "--forkbackend") == 0 ||
 		strcmp(argv[1], "--forkavlauncher") == 0 ||
 		strcmp(argv[1], "--forkavworker") == 0 ||
-		strcmp(argv[1], "--forkboot") == 0 ||
+		strcmp(argv[1], "--forkaux") == 0 ||
 		strncmp(argv[1], "--forkbgworker=", 15) == 0)
 		PGSharedMemoryReAttach();
 	else
@@ -4995,8 +5097,12 @@ SubPostmasterMain(int argc, char *argv[])
 		/* And run the backend */
 		BackendRun(&port);		/* does not return */
 	}
-	if (strcmp(argv[1], "--forkboot") == 0)
+	if (strcmp(argv[1], "--forkaux") == 0)
 	{
+		AuxProcType auxtype;
+
+		Assert(argc == 4);
+
 		/* Restore basic shared memory pointers */
 		InitShmemAccess(UsedShmemSegAddr);
 
@@ -5006,7 +5112,8 @@ SubPostmasterMain(int argc, char *argv[])
 		/* Attach process to shared data structures */
 		CreateSharedMemoryAndSemaphores();
 
-		AuxiliaryProcessMain(argc - 2, argv + 2);	/* does not return */
+		auxtype = atoi(argv[3]);
+		AuxiliaryProcessMain(auxtype);	/* does not return */
 	}
 	if (strcmp(argv[1], "--forkavlauncher") == 0)
 	{
@@ -5139,15 +5246,6 @@ sigusr1_handler(SIGNAL_ARGS)
 		AbortStartTime = 0;
 
 		/*
-		 * Crank up the background tasks.  It doesn't matter if this fails,
-		 * we'll just try again later.
-		 */
-		Assert(CheckpointerPID == 0);
-		CheckpointerPID = StartCheckpointer();
-		Assert(BgWriterPID == 0);
-		BgWriterPID = StartBackgroundWriter();
-
-		/*
 		 * Start the archiver if we're responsible for (re-)archiving received
 		 * files.
 		 */
@@ -5181,7 +5279,7 @@ sigusr1_handler(SIGNAL_ARGS)
 		PgStatPID = pgstat_start();
 
 		ereport(LOG,
-				(errmsg("database system is ready to accept read only connections")));
+				(errmsg("database system is ready to accept read-only connections")));
 
 		/* Report status */
 		AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_READY);
@@ -5394,28 +5492,28 @@ static pid_t
 StartChildProcess(AuxProcType type)
 {
 	pid_t		pid;
-	char	   *av[10];
-	int			ac = 0;
-	char		typebuf[32];
-
-	/*
-	 * Set up command-line arguments for subprocess
-	 */
-	av[ac++] = "postgres";
 
 #ifdef EXEC_BACKEND
-	av[ac++] = "--forkboot";
-	av[ac++] = NULL;			/* filled in by postmaster_forkexec */
-#endif
+	{
+		char	   *av[10];
+		int			ac = 0;
+		char		typebuf[32];
 
-	snprintf(typebuf, sizeof(typebuf), "-x%d", type);
-	av[ac++] = typebuf;
+		/*
+		 * Set up command-line arguments for subprocess
+		 */
+		av[ac++] = "postgres";
+		av[ac++] = "--forkaux";
+		av[ac++] = NULL;		/* filled in by postmaster_forkexec */
 
-	av[ac] = NULL;
-	Assert(ac < lengthof(av));
+		snprintf(typebuf, sizeof(typebuf), "%d", type);
+		av[ac++] = typebuf;
 
-#ifdef EXEC_BACKEND
-	pid = postmaster_forkexec(ac, av);
+		av[ac] = NULL;
+		Assert(ac < lengthof(av));
+
+		pid = postmaster_forkexec(ac, av);
+	}
 #else							/* !EXEC_BACKEND */
 	pid = fork_process();
 
@@ -5431,8 +5529,7 @@ StartChildProcess(AuxProcType type)
 		MemoryContextDelete(PostmasterContext);
 		PostmasterContext = NULL;
 
-		AuxiliaryProcessMain(ac, av);
-		ExitPostmaster(0);
+		AuxiliaryProcessMain(type); /* does not return */
 	}
 #endif							/* EXEC_BACKEND */
 
@@ -5775,7 +5872,7 @@ do_start_bgworker(RegisteredBgWorker *rw)
 
 	ereport(DEBUG1,
 			(errmsg_internal("starting background worker process \"%s\"",
-					rw->rw_worker.bgw_name)));
+							 rw->rw_worker.bgw_name)));
 
 #ifdef EXEC_BACKEND
 	switch ((worker_pid = bgworker_forkexec(rw->rw_shmem_slot)))
@@ -6162,6 +6259,7 @@ save_backend_variables(BackendParameters *param, Port *port,
 
 	param->redirection_done = redirection_done;
 	param->IsBinaryUpgrade = IsBinaryUpgrade;
+	param->query_id_enabled = query_id_enabled;
 	param->max_safe_fds = max_safe_fds;
 
 	param->MaxBackends = MaxBackends;
@@ -6395,6 +6493,7 @@ restore_backend_variables(BackendParameters *param, Port *port)
 
 	redirection_done = param->redirection_done;
 	IsBinaryUpgrade = param->IsBinaryUpgrade;
+	query_id_enabled = param->query_id_enabled;
 	max_safe_fds = param->max_safe_fds;
 
 	MaxBackends = param->MaxBackends;
