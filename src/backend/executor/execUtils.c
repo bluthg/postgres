@@ -65,7 +65,7 @@
 #include "utils/typcache.h"
 
 
-static bool tlist_matches_tupdesc(PlanState *ps, List *tlist, Index varno, TupleDesc tupdesc);
+static bool tlist_matches_tupdesc(PlanState *ps, List *tlist, int varno, TupleDesc tupdesc);
 static void ShutdownExprContext(ExprContext *econtext, bool isCommit);
 
 
@@ -553,7 +553,7 @@ ExecAssignProjectionInfo(PlanState *planstate,
  */
 void
 ExecConditionalAssignProjectionInfo(PlanState *planstate, TupleDesc inputDesc,
-									Index varno)
+									int varno)
 {
 	if (tlist_matches_tupdesc(planstate,
 							  planstate->plan->targetlist,
@@ -579,7 +579,7 @@ ExecConditionalAssignProjectionInfo(PlanState *planstate, TupleDesc inputDesc,
 }
 
 static bool
-tlist_matches_tupdesc(PlanState *ps, List *tlist, Index varno, TupleDesc tupdesc)
+tlist_matches_tupdesc(PlanState *ps, List *tlist, int varno, TupleDesc tupdesc)
 {
 	int			numattrs = tupdesc->natts;
 	int			attrno;
@@ -1223,6 +1223,32 @@ ExecGetReturningSlot(EState *estate, ResultRelInfo *relInfo)
 	}
 
 	return relInfo->ri_ReturningSlot;
+}
+
+/*
+ * Return the map needed to convert given child result relation's tuples to
+ * the rowtype of the query's main target ("root") relation.  Note that a
+ * NULL result is valid and means that no conversion is needed.
+ */
+TupleConversionMap *
+ExecGetChildToRootMap(ResultRelInfo *resultRelInfo)
+{
+	/* If we didn't already do so, compute the map for this child. */
+	if (!resultRelInfo->ri_ChildToRootMapValid)
+	{
+		ResultRelInfo *rootRelInfo = resultRelInfo->ri_RootResultRelInfo;
+
+		if (rootRelInfo)
+			resultRelInfo->ri_ChildToRootMap =
+				convert_tuples_by_name(RelationGetDescr(resultRelInfo->ri_RelationDesc),
+									   RelationGetDescr(rootRelInfo->ri_RelationDesc));
+		else					/* this isn't a child result rel */
+			resultRelInfo->ri_ChildToRootMap = NULL;
+
+		resultRelInfo->ri_ChildToRootMapValid = true;
+	}
+
+	return resultRelInfo->ri_ChildToRootMap;
 }
 
 /* Return a bitmap representing columns being inserted */

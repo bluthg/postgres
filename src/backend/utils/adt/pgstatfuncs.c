@@ -24,6 +24,7 @@
 #include "pgstat.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/postmaster.h"
+#include "replication/slot.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
@@ -34,9 +35,6 @@
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
 
 #define HAS_PGSTAT_PERMISSIONS(role)	 (is_member_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS) || has_privs_of_role(GetUserId(), role))
-
-/* Global bgwriter statistics, from bgwriter.c */
-extern PgStat_MsgBgWriter bgwriterStats;
 
 Datum
 pg_stat_get_numscans(PG_FUNCTION_ARGS)
@@ -629,7 +627,7 @@ pg_stat_get_progress_info(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_activity(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_ACTIVITY_COLS	29
+#define PG_STAT_GET_ACTIVITY_COLS	30
 	int			num_backends = pgstat_fetch_stat_numbackends();
 	int			curr_backend;
 	int			pid = PG_ARGISNULL(0) ? -1 : PG_GETARG_INT32(0);
@@ -974,6 +972,10 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 				values[27] = BoolGetDatum(false);	/* GSS Encryption not in
 													 * use */
 			}
+			if (beentry->st_query_id == 0)
+				nulls[29] = true;
+			else
+				values[29] = UInt64GetDatum(beentry->st_query_id);
 		}
 		else
 		{
@@ -1001,6 +1003,7 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 			nulls[26] = true;
 			nulls[27] = true;
 			nulls[28] = true;
+			nulls[29] = true;
 		}
 
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
@@ -1786,69 +1789,71 @@ pg_stat_get_db_sessions_killed(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_bgwriter_timed_checkpoints(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->timed_checkpoints);
+	PG_RETURN_INT64(pgstat_fetch_stat_checkpointer()->timed_checkpoints);
 }
 
 Datum
 pg_stat_get_bgwriter_requested_checkpoints(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->requested_checkpoints);
+	PG_RETURN_INT64(pgstat_fetch_stat_checkpointer()->requested_checkpoints);
 }
 
 Datum
 pg_stat_get_bgwriter_buf_written_checkpoints(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_checkpoints);
+	PG_RETURN_INT64(pgstat_fetch_stat_checkpointer()->buf_written_checkpoints);
 }
 
 Datum
 pg_stat_get_bgwriter_buf_written_clean(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_clean);
+	PG_RETURN_INT64(pgstat_fetch_stat_bgwriter()->buf_written_clean);
 }
 
 Datum
 pg_stat_get_bgwriter_maxwritten_clean(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->maxwritten_clean);
+	PG_RETURN_INT64(pgstat_fetch_stat_bgwriter()->maxwritten_clean);
 }
 
 Datum
 pg_stat_get_checkpoint_write_time(PG_FUNCTION_ARGS)
 {
 	/* time is already in msec, just convert to double for presentation */
-	PG_RETURN_FLOAT8((double) pgstat_fetch_global()->checkpoint_write_time);
+	PG_RETURN_FLOAT8((double)
+					 pgstat_fetch_stat_checkpointer()->checkpoint_write_time);
 }
 
 Datum
 pg_stat_get_checkpoint_sync_time(PG_FUNCTION_ARGS)
 {
 	/* time is already in msec, just convert to double for presentation */
-	PG_RETURN_FLOAT8((double) pgstat_fetch_global()->checkpoint_sync_time);
+	PG_RETURN_FLOAT8((double)
+					 pgstat_fetch_stat_checkpointer()->checkpoint_sync_time);
 }
 
 Datum
 pg_stat_get_bgwriter_stat_reset_time(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TIMESTAMPTZ(pgstat_fetch_global()->stat_reset_timestamp);
+	PG_RETURN_TIMESTAMPTZ(pgstat_fetch_stat_bgwriter()->stat_reset_timestamp);
 }
 
 Datum
 pg_stat_get_buf_written_backend(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_backend);
+	PG_RETURN_INT64(pgstat_fetch_stat_checkpointer()->buf_written_backend);
 }
 
 Datum
 pg_stat_get_buf_fsync_backend(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_fsync_backend);
+	PG_RETURN_INT64(pgstat_fetch_stat_checkpointer()->buf_fsync_backend);
 }
 
 Datum
 pg_stat_get_buf_alloc(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_alloc);
+	PG_RETURN_INT64(pgstat_fetch_stat_bgwriter()->buf_alloc);
 }
 
 /*
@@ -1966,7 +1971,7 @@ pg_stat_get_slru(PG_FUNCTION_ARGS)
 		/* for each row */
 		Datum		values[PG_STAT_GET_SLRU_COLS];
 		bool		nulls[PG_STAT_GET_SLRU_COLS];
-		PgStat_SLRUStats stat = stats[i];
+		PgStat_SLRUStats stat;
 		const char *name;
 
 		name = pgstat_slru_name(i);
@@ -1974,6 +1979,7 @@ pg_stat_get_slru(PG_FUNCTION_ARGS)
 		if (!name)
 			break;
 
+		stat = stats[i];
 		MemSet(values, 0, sizeof(values));
 		MemSet(nulls, 0, sizeof(nulls));
 
@@ -2226,7 +2232,7 @@ pg_stat_reset_single_table_counters(PG_FUNCTION_ARGS)
 {
 	Oid			taboid = PG_GETARG_OID(0);
 
-	pgstat_reset_single_counter(taboid, RESET_TABLE);
+	pgstat_reset_single_counter(taboid, InvalidOid, RESET_TABLE);
 
 	PG_RETURN_VOID();
 }
@@ -2236,10 +2242,37 @@ pg_stat_reset_single_function_counters(PG_FUNCTION_ARGS)
 {
 	Oid			funcoid = PG_GETARG_OID(0);
 
-	pgstat_reset_single_counter(funcoid, RESET_FUNCTION);
+	pgstat_reset_single_counter(funcoid, InvalidOid, RESET_FUNCTION);
 
 	PG_RETURN_VOID();
 }
+
+Datum
+pg_stat_reset_subscription_worker_subrel(PG_FUNCTION_ARGS)
+{
+	Oid			subid = PG_GETARG_OID(0);
+	Oid			relid = PG_ARGISNULL(1) ? InvalidOid : PG_GETARG_OID(1);
+
+	pgstat_reset_single_counter(subid, relid, RESET_SUBWORKER);
+
+	PG_RETURN_VOID();
+}
+
+/* Reset all subscription worker stats associated with the given subscription */
+Datum
+pg_stat_reset_subscription_worker_sub(PG_FUNCTION_ARGS)
+{
+	Oid			subid = PG_GETARG_OID(0);
+
+	/*
+	 * Use subscription drop message to remove statistics of all subscription
+	 * workers.
+	 */
+	pgstat_report_subscription_drop(subid);
+
+	PG_RETURN_VOID();
+}
+
 
 /* Reset SLRU counters (a specific one or all of them). */
 Datum
@@ -2262,7 +2295,32 @@ pg_stat_reset_replication_slot(PG_FUNCTION_ARGS)
 	char	   *target = NULL;
 
 	if (!PG_ARGISNULL(0))
+	{
+		ReplicationSlot *slot;
+
 		target = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+		/*
+		 * Check if the slot exists with the given name. It is possible that
+		 * by the time this message is executed the slot is dropped but at
+		 * least this check will ensure that the given name is for a valid
+		 * slot.
+		 */
+		slot = SearchNamedReplicationSlot(target, true);
+
+		if (!slot)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("replication slot \"%s\" does not exist",
+							target)));
+
+		/*
+		 * Nothing to do for physical slots as we collect stats only for
+		 * logical slots.
+		 */
+		if (SlotIsPhysical(slot))
+			PG_RETURN_VOID();
+	}
 
 	pgstat_reset_replslot_counter(target);
 
@@ -2335,71 +2393,174 @@ pg_stat_get_archiver(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
-/* Get the statistics for the replication slots */
+/*
+ * Get the statistics for the replication slot. If the slot statistics is not
+ * available, return all-zeroes stats.
+ */
 Datum
-pg_stat_get_replication_slots(PG_FUNCTION_ARGS)
+pg_stat_get_replication_slot(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_REPLICATION_SLOT_COLS 8
-	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+#define PG_STAT_GET_REPLICATION_SLOT_COLS 10
+	text	   *slotname_text = PG_GETARG_TEXT_P(0);
+	NameData	slotname;
 	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
-	PgStat_ReplSlotStats *slotstats;
-	int			nstats;
-	int			i;
+	Datum		values[PG_STAT_GET_REPLICATION_SLOT_COLS];
+	bool		nulls[PG_STAT_GET_REPLICATION_SLOT_COLS];
+	PgStat_StatReplSlotEntry *slotent;
+	PgStat_StatReplSlotEntry allzero;
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
+	/* Initialise values and NULL flags arrays */
+	MemSet(values, 0, sizeof(values));
+	MemSet(nulls, 0, sizeof(nulls));
 
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
+	/* Initialise attributes information in the tuple descriptor */
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_REPLICATION_SLOT_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "slot_name",
+					   TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "spill_txns",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "spill_count",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "spill_bytes",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "stream_txns",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "stream_count",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "stream_bytes",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "total_txns",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 9, "total_bytes",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 10, "stats_reset",
+					   TIMESTAMPTZOID, -1, 0);
+	BlessTupleDesc(tupdesc);
 
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
-
-	slotstats = pgstat_fetch_replslot(&nstats);
-	for (i = 0; i < nstats; i++)
+	namestrcpy(&slotname, text_to_cstring(slotname_text));
+	slotent = pgstat_fetch_replslot(slotname);
+	if (!slotent)
 	{
-		Datum		values[PG_STAT_GET_REPLICATION_SLOT_COLS];
-		bool		nulls[PG_STAT_GET_REPLICATION_SLOT_COLS];
-		PgStat_ReplSlotStats *s = &(slotstats[i]);
-
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, 0, sizeof(nulls));
-
-		values[0] = PointerGetDatum(cstring_to_text(s->slotname));
-		values[1] = Int64GetDatum(s->spill_txns);
-		values[2] = Int64GetDatum(s->spill_count);
-		values[3] = Int64GetDatum(s->spill_bytes);
-		values[4] = Int64GetDatum(s->stream_txns);
-		values[5] = Int64GetDatum(s->stream_count);
-		values[6] = Int64GetDatum(s->stream_bytes);
-
-		if (s->stat_reset_timestamp == 0)
-			nulls[7] = true;
-		else
-			values[7] = TimestampTzGetDatum(s->stat_reset_timestamp);
-
-		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		/*
+		 * If the slot is not found, initialise its stats. This is possible if
+		 * the create slot message is lost.
+		 */
+		memset(&allzero, 0, sizeof(PgStat_StatReplSlotEntry));
+		slotent = &allzero;
 	}
 
-	tuplestore_donestoring(tupstore);
+	values[0] = CStringGetTextDatum(NameStr(slotname));
+	values[1] = Int64GetDatum(slotent->spill_txns);
+	values[2] = Int64GetDatum(slotent->spill_count);
+	values[3] = Int64GetDatum(slotent->spill_bytes);
+	values[4] = Int64GetDatum(slotent->stream_txns);
+	values[5] = Int64GetDatum(slotent->stream_count);
+	values[6] = Int64GetDatum(slotent->stream_bytes);
+	values[7] = Int64GetDatum(slotent->total_txns);
+	values[8] = Int64GetDatum(slotent->total_bytes);
 
-	return (Datum) 0;
+	if (slotent->stat_reset_timestamp == 0)
+		nulls[9] = true;
+	else
+		values[9] = TimestampTzGetDatum(slotent->stat_reset_timestamp);
+
+	/* Returns the record as Datum */
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/*
+ * Get the subscription worker statistics for the given subscription
+ * (and relation).
+ */
+Datum
+pg_stat_get_subscription_worker(PG_FUNCTION_ARGS)
+{
+#define PG_STAT_GET_SUBSCRIPTION_WORKER_COLS	8
+	Oid			subid = PG_GETARG_OID(0);
+	Oid			subrelid;
+	TupleDesc	tupdesc;
+	Datum		values[PG_STAT_GET_SUBSCRIPTION_WORKER_COLS];
+	bool		nulls[PG_STAT_GET_SUBSCRIPTION_WORKER_COLS];
+	PgStat_StatSubWorkerEntry *wentry;
+	int			i;
+
+	if (PG_ARGISNULL(1))
+		subrelid = InvalidOid;
+	else
+		subrelid = PG_GETARG_OID(1);
+
+	/* Get subscription worker stats */
+	wentry = pgstat_fetch_stat_subworker_entry(subid, subrelid);
+
+	/* Return NULL if there is no worker statistics */
+	if (wentry == NULL)
+		PG_RETURN_NULL();
+
+	/* Initialise attributes information in the tuple descriptor */
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_SUBSCRIPTION_WORKER_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "subid",
+					   OIDOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "subrelid",
+					   OIDOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "last_error_relid",
+					   OIDOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "last_error_command",
+					   TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "last_error_xid",
+					   XIDOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "last_error_count",
+					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "last_error_message",
+					   TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 8, "last_error_time",
+					   TIMESTAMPTZOID, -1, 0);
+	BlessTupleDesc(tupdesc);
+
+	/* Initialise values and NULL flags arrays */
+	MemSet(values, 0, sizeof(values));
+	MemSet(nulls, 0, sizeof(nulls));
+
+	i = 0;
+	/* subid */
+	values[i++] = ObjectIdGetDatum(subid);
+
+	/* subrelid */
+	if (OidIsValid(subrelid))
+		values[i++] = ObjectIdGetDatum(subrelid);
+	else
+		nulls[i++] = true;
+
+	/* last_error_relid */
+	if (OidIsValid(wentry->last_error_relid))
+		values[i++] = ObjectIdGetDatum(wentry->last_error_relid);
+	else
+		nulls[i++] = true;
+
+	/* last_error_command */
+	if (wentry->last_error_command != 0)
+		values[i++] =
+			CStringGetTextDatum(logicalrep_message_type(wentry->last_error_command));
+	else
+		nulls[i++] = true;
+
+	/* last_error_xid */
+	if (TransactionIdIsValid(wentry->last_error_xid))
+		values[i++] = TransactionIdGetDatum(wentry->last_error_xid);
+	else
+		nulls[i++] = true;
+
+	/* last_error_count */
+	values[i++] = Int64GetDatum(wentry->last_error_count);
+
+	/* last_error_message */
+	values[i++] = CStringGetTextDatum(wentry->last_error_message);
+
+	/* last_error_time */
+	if (wentry->last_error_time != 0)
+		values[i++] = TimestampTzGetDatum(wentry->last_error_time);
+	else
+		nulls[i++] = true;
+
+	/* Returns the record as Datum */
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

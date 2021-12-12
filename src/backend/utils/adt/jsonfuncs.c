@@ -652,7 +652,7 @@ report_json_context(JsonLexContext *lex)
 	context_end = lex->token_terminator;
 
 	/* Advance until we are close enough to context_end */
-	while (context_end - context_start >= 50 && context_start < context_end)
+	while (context_end - context_start >= 50)
 	{
 		/* Advance to next multibyte character */
 		if (IS_HIGHBIT_SET(*context_start))
@@ -680,7 +680,9 @@ report_json_context(JsonLexContext *lex)
 	 * suffixing "..." if not ending at end of line.
 	 */
 	prefix = (context_start > line_start) ? "..." : "";
-	suffix = (lex->token_type != JSON_TOKEN_END && context_end - lex->input < lex->input_length && *context_end != '\n' && *context_end != '\r') ? "..." : "";
+	suffix = (lex->token_type != JSON_TOKEN_END &&
+			  context_end - lex->input < lex->input_length &&
+			  *context_end != '\n' && *context_end != '\r') ? "..." : "";
 
 	return errcontext("JSON data, line %d: %s%s%s",
 					  lex->line_number, prefix, ctxt, suffix);
@@ -1651,7 +1653,7 @@ push_null_elements(JsonbParseState **ps, int num)
  * this path. E.g. the path [a][0][b] with the new value 1 will produce the
  * structure {a: [{b: 1}]}.
  *
- * Called is responsible to make sure such path does not exist yet.
+ * Caller is responsible to make sure such path does not exist yet.
  */
 static void
 push_path(JsonbParseState **st, int level, Datum *path_elems,
@@ -4882,12 +4884,12 @@ IteratorConcat(JsonbIterator **it1, JsonbIterator **it2,
  * case if target is an array. The assignment index will not be restricted by
  * number of elements in the array, and if there are any empty slots between
  * last element of the array and a new one they will be filled with nulls. If
- * the index is negative, it still will be considered an an index from the end
+ * the index is negative, it still will be considered an index from the end
  * of the array. Of a part of the path is not present and this part is more
  * than just one last element, this flag will instruct to create the whole
  * chain of corresponding objects and insert the value.
  *
- * JB_PATH_CONSISTENT_POSITION for an array indicates that the called wants to
+ * JB_PATH_CONSISTENT_POSITION for an array indicates that the caller wants to
  * keep values with fixed indices. Indices for existing elements could be
  * changed (shifted forward) in case if the array is prepended with a new value
  * and a negative index out of the range, so this behavior will be prevented
@@ -4920,7 +4922,7 @@ setPath(JsonbIterator **it, Datum *path_elems,
 		case WJB_BEGIN_ARRAY:
 
 			/*
-			 * If instructed complain about attempts to replace whithin a raw
+			 * If instructed complain about attempts to replace within a raw
 			 * scalar value. This happens even when current level is equal to
 			 * path_len, because the last path key should also correspond to
 			 * an object or an array, not raw scalar.
@@ -4952,7 +4954,7 @@ setPath(JsonbIterator **it, Datum *path_elems,
 		case WJB_VALUE:
 
 			/*
-			 * If instructed complain about attempts to replace whithin a
+			 * If instructed complain about attempts to replace within a
 			 * scalar value. This happens even when current level is equal to
 			 * path_len, because the last path key should also correspond to
 			 * an object or an array, not an element or value.

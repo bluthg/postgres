@@ -1,3 +1,6 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # Verify the behavior of assorted pg_verifybackup options.
 
 use strict;
@@ -5,12 +8,12 @@ use warnings;
 use Cwd;
 use Config;
 use File::Path qw(rmtree);
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 25;
 
 # Start up the server and take a backup.
-my $primary = get_new_node('primary');
+my $primary = PostgreSQL::Test::Cluster->new('primary');
 $primary->init(allows_streaming => 1);
 $primary->start;
 my $backup_path = $primary->backup_dir . '/test_options';

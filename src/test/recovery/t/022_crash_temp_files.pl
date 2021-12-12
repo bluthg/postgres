@@ -1,8 +1,11 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # Test remove of temporary files after a crash.
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More;
 use Config;
 
@@ -23,11 +26,11 @@ else
 # is really wrong.
 my $psql_timeout = IPC::Run::timer(60);
 
-my $node = get_new_node('node_crash');
+my $node = PostgreSQL::Test::Cluster->new('node_crash');
 $node->init();
 $node->start();
 
-# By default, PostgresNode doesn't restart after crash
+# By default, PostgreSQL::Test::Cluster doesn't restart after crash
 # Reduce work_mem to generate temporary file with a few number of rows
 $node->safe_psql(
 	'postgres',
@@ -38,9 +41,7 @@ $node->safe_psql(
 				   SELECT pg_reload_conf();]);
 
 # create table, insert rows
-$node->safe_psql(
-	'postgres',
-	q[CREATE TABLE tab_crash (a integer UNIQUE);]);
+$node->safe_psql('postgres', q[CREATE TABLE tab_crash (a integer UNIQUE);]);
 
 # Run psql, keeping session alive, so we have an alive backend to kill.
 my ($killme_stdin, $killme_stdout, $killme_stderr) = ('', '', '');
@@ -115,7 +116,8 @@ DECLARE
   c INT;
 BEGIN
   LOOP
-    SELECT COUNT(*) INTO c FROM pg_locks WHERE pid = ] . $pid . q[ AND NOT granted;
+    SELECT COUNT(*) INTO c FROM pg_locks WHERE pid = ] . $pid
+  . q[ AND NOT granted;
     IF c > 0 THEN
       EXIT;
     END IF;
@@ -129,7 +131,7 @@ $killme_stdout2 = '';
 $killme_stderr2 = '';
 
 # Kill with SIGKILL
-my $ret = TestLib::system_log('pg_ctl', 'kill', 'KILL', $pid);
+my $ret = PostgreSQL::Test::Utils::system_log('pg_ctl', 'kill', 'KILL', $pid);
 is($ret, 0, 'killed process with KILL');
 
 # Close psql session
@@ -137,13 +139,13 @@ $killme->finish;
 $killme2->finish;
 
 # Wait till server restarts
-$node->poll_query_until('postgres', 'SELECT 1', '1');
+$node->poll_query_until('postgres', undef, '');
 
 # Check for temporary files
-is($node->safe_psql(
-	'postgres',
-	'SELECT COUNT(1) FROM pg_ls_dir($$base/pgsql_tmp$$)'),
-	qq(0), 'no temporary files');
+is( $node->safe_psql(
+		'postgres', 'SELECT COUNT(1) FROM pg_ls_dir($$base/pgsql_tmp$$)'),
+	qq(0),
+	'no temporary files');
 
 #
 # Test old behavior (don't remove temporary files after crash)
@@ -203,7 +205,8 @@ DECLARE
   c INT;
 BEGIN
   LOOP
-    SELECT COUNT(*) INTO c FROM pg_locks WHERE pid = ] . $pid . q[ AND NOT granted;
+    SELECT COUNT(*) INTO c FROM pg_locks WHERE pid = ] . $pid
+  . q[ AND NOT granted;
     IF c > 0 THEN
       EXIT;
     END IF;
@@ -217,7 +220,7 @@ $killme_stdout2 = '';
 $killme_stderr2 = '';
 
 # Kill with SIGKILL
-$ret = TestLib::system_log('pg_ctl', 'kill', 'KILL', $pid);
+$ret = PostgreSQL::Test::Utils::system_log('pg_ctl', 'kill', 'KILL', $pid);
 is($ret, 0, 'killed process with KILL');
 
 # Close psql session
@@ -225,22 +228,22 @@ $killme->finish;
 $killme2->finish;
 
 # Wait till server restarts
-$node->poll_query_until('postgres', 'SELECT 1', '1');
+$node->poll_query_until('postgres', undef, '');
 
 # Check for temporary files -- should be there
-is($node->safe_psql(
-	'postgres',
-	'SELECT COUNT(1) FROM pg_ls_dir($$base/pgsql_tmp$$)'),
-	qq(1), 'one temporary file');
+is( $node->safe_psql(
+		'postgres', 'SELECT COUNT(1) FROM pg_ls_dir($$base/pgsql_tmp$$)'),
+	qq(1),
+	'one temporary file');
 
 # Restart should remove the temporary files
 $node->restart();
 
 # Check the temporary files -- should be gone
-is($node->safe_psql(
-	'postgres',
-	'SELECT COUNT(1) FROM pg_ls_dir($$base/pgsql_tmp$$)'),
-	qq(0), 'temporary file was removed');
+is( $node->safe_psql(
+		'postgres', 'SELECT COUNT(1) FROM pg_ls_dir($$base/pgsql_tmp$$)'),
+	qq(0),
+	'temporary file was removed');
 
 $node->stop();
 

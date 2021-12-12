@@ -543,7 +543,6 @@ transformRangeFunction(ParseState *pstate, RangeFunction *r)
 				!fc->agg_star &&
 				!fc->agg_distinct &&
 				!fc->func_variadic &&
-				fc->funcformat == COERCE_EXPLICIT_CALL &&
 				coldeflist == NIL)
 			{
 				ListCell   *lc;
@@ -853,7 +852,7 @@ transformRangeTableFunc(ParseState *pstate, RangeTableFunc *rtf)
 			{
 				foreach(lc2, ns_names)
 				{
-					Value	   *ns_node = (Value *) lfirst(lc2);
+					String	   *ns_node = lfirst_node(String, lc2);
 
 					if (ns_node == NULL)
 						continue;
@@ -1241,7 +1240,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			foreach(lx, l_colnames)
 			{
 				char	   *l_colname = strVal(lfirst(lx));
-				Value	   *m_name = NULL;
+				String	   *m_name = NULL;
 
 				if (l_colname[0] == '\0')
 					continue;	/* ignore dropped columns */
@@ -1786,7 +1785,7 @@ transformLimitClause(ParseState *pstate, Node *clause,
 	 * unadorned NULL that's not accepted back by the grammar.
 	 */
 	if (exprKind == EXPR_KIND_LIMIT && limitOption == LIMIT_OPTION_WITH_TIES &&
-		IsA(clause, A_Const) && ((A_Const *) clause)->val.type == T_Null)
+		IsA(clause, A_Const) && castNode(A_Const, clause)->isnull)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE),
 				 errmsg("row count cannot be null in FETCH FIRST ... WITH TIES clause")));
@@ -1999,20 +1998,19 @@ findTargetlistEntrySQL92(ParseState *pstate, Node *node, List **tlist,
 	}
 	if (IsA(node, A_Const))
 	{
-		Value	   *val = &((A_Const *) node)->val;
-		int			location = ((A_Const *) node)->location;
+		A_Const	   *aconst = castNode(A_Const, node);
 		int			targetlist_pos = 0;
 		int			target_pos;
 
-		if (!IsA(val, Integer))
+		if (!IsA(&aconst->val, Integer))
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 			/* translator: %s is name of a SQL construct, eg ORDER BY */
 					 errmsg("non-integer constant in %s",
 							ParseExprKindName(exprKind)),
-					 parser_errposition(pstate, location)));
+					 parser_errposition(pstate, aconst->location)));
 
-		target_pos = intVal(val);
+		target_pos = intVal(&aconst->val);
 		foreach(tl, *tlist)
 		{
 			TargetEntry *tle = (TargetEntry *) lfirst(tl);
@@ -2032,7 +2030,7 @@ findTargetlistEntrySQL92(ParseState *pstate, Node *node, List **tlist,
 		/* translator: %s is name of a SQL construct, eg ORDER BY */
 				 errmsg("%s position %d is not in select list",
 						ParseExprKindName(exprKind), target_pos),
-				 parser_errposition(pstate, location)));
+				 parser_errposition(pstate, aconst->location)));
 	}
 
 	/*
@@ -2808,7 +2806,7 @@ transformWindowDefinitions(ParseState *pstate,
 						(errcode(ERRCODE_WINDOWING_ERROR),
 						 errmsg("RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column"),
 						 parser_errposition(pstate, windef->location)));
-			sortcl = castNode(SortGroupClause, linitial(wc->orderClause));
+			sortcl = linitial_node(SortGroupClause, wc->orderClause);
 			sortkey = get_sortgroupclause_expr(sortcl, *targetlist);
 			/* Find the sort operator in pg_amop */
 			if (!get_ordering_op_properties(sortcl->sortop,
@@ -3222,17 +3220,6 @@ transformOnConflictArbiter(ParseState *pstate,
 	/* ON CONFLICT DO NOTHING does not require an inference clause */
 	if (infer)
 	{
-		List	   *save_namespace;
-
-		/*
-		 * While we process the arbiter expressions, accept only non-qualified
-		 * references to the target table. Hide any other relations.
-		 */
-		save_namespace = pstate->p_namespace;
-		pstate->p_namespace = NIL;
-		addNSItemToQuery(pstate, pstate->p_target_nsitem,
-						 false, false, true);
-
 		if (infer->indexElems)
 			*arbiterExpr = resolve_unique_index_expr(pstate, infer,
 													 pstate->p_target_relation);
@@ -3244,8 +3231,6 @@ transformOnConflictArbiter(ParseState *pstate,
 		if (infer->whereClause)
 			*arbiterWhere = transformExpr(pstate, infer->whereClause,
 										  EXPR_KIND_INDEX_PREDICATE);
-
-		pstate->p_namespace = save_namespace;
 
 		/*
 		 * If the arbiter is specified by constraint name, get the constraint

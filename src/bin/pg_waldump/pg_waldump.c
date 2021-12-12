@@ -13,6 +13,7 @@
 #include "postgres.h"
 
 #include <dirent.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -28,6 +29,7 @@
 static const char *progname;
 
 static int	WalSegSz;
+static volatile sig_atomic_t time_to_stop = false;
 
 typedef struct XLogDumpPrivate
 {
@@ -49,7 +51,8 @@ typedef struct XLogDumpConfig
 	bool		stats_per_record;
 
 	/* filter options */
-	int			filter_by_rmgr;
+	bool		filter_by_rmgr[RM_MAX_ID + 1];
+	bool		filter_by_rmgr_enabled;
 	TransactionId filter_by_xid;
 	bool		filter_by_xid_enabled;
 } XLogDumpConfig;
@@ -66,11 +69,26 @@ typedef struct Stats
 typedef struct XLogDumpStats
 {
 	uint64		count;
+	XLogRecPtr	startptr;
+	XLogRecPtr	endptr;
 	Stats		rmgr_stats[RM_NEXT_ID];
 	Stats		record_stats[RM_NEXT_ID][MAX_XLINFO_TYPES];
 } XLogDumpStats;
 
 #define fatal_error(...) do { pg_log_fatal(__VA_ARGS__); exit(EXIT_FAILURE); } while(0)
+
+/*
+ * When sigint is called, just tell the system to exit at the next possible
+ * moment.
+ */
+#ifndef WIN32
+
+static void
+sigint_handler(int signum)
+{
+	time_to_stop = true;
+}
+#endif
 
 static void
 print_rmgr_list(void)
@@ -210,8 +228,8 @@ search_directory(const char *directory, const char *fname)
 				fatal_error("could not read file \"%s\": %m",
 							fname);
 			else
-				fatal_error("could not read file \"%s\": read %d of %zu",
-							fname, r, (Size) XLOG_BLCKSZ);
+				fatal_error("could not read file \"%s\": read %d of %d",
+							fname, r, XLOG_BLCKSZ);
 		}
 		close(fd);
 		return true;
@@ -368,9 +386,9 @@ WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 						fname, errinfo.wre_off);
 		}
 		else
-			fatal_error("could not read from file %s, offset %u: read %d of %zu",
+			fatal_error("could not read from file %s, offset %u: read %d of %d",
 						fname, errinfo.wre_off, errinfo.wre_read,
-						(Size) errinfo.wre_req);
+						errinfo.wre_req);
 	}
 
 	return count;
@@ -537,18 +555,29 @@ XLogDumpDisplayRecord(XLogDumpConfig *config, XLogReaderState *record)
 				   blk);
 			if (XLogRecHasBlockImage(record, block_id))
 			{
-				if (record->blocks[block_id].bimg_info &
-					BKPIMAGE_IS_COMPRESSED)
+				uint8		bimg_info = record->blocks[block_id].bimg_info;
+
+				if (BKPIMAGE_COMPRESSED(bimg_info))
 				{
+					const char *method;
+
+					if ((bimg_info & BKPIMAGE_COMPRESS_PGLZ) != 0)
+						method = "pglz";
+					else if ((bimg_info & BKPIMAGE_COMPRESS_LZ4) != 0)
+						method = "lz4";
+					else
+						method = "unknown";
+
 					printf(" (FPW%s); hole: offset: %u, length: %u, "
-						   "compression saved: %u",
+						   "compression saved: %u, method: %s",
 						   XLogRecBlockImageApply(record, block_id) ?
 						   "" : " for WAL verification",
 						   record->blocks[block_id].hole_offset,
 						   record->blocks[block_id].hole_length,
 						   BLCKSZ -
 						   record->blocks[block_id].hole_length -
-						   record->blocks[block_id].bimg_len);
+						   record->blocks[block_id].bimg_len,
+						   method);
 				}
 				else
 				{
@@ -621,6 +650,12 @@ XLogDumpDisplayStats(XLogDumpConfig *config, XLogDumpStats *stats)
 				fpi_len_pct;
 
 	/*
+	 * Leave if no stats have been computed yet, as tracked by the end LSN.
+	 */
+	if (XLogRecPtrIsInvalid(stats->endptr))
+		return;
+
+	/*
 	 * Each row shows its percentages of the total, so make a first pass to
 	 * calculate column totals.
 	 */
@@ -632,6 +667,9 @@ XLogDumpDisplayStats(XLogDumpConfig *config, XLogDumpStats *stats)
 		total_fpi_len += stats->rmgr_stats[ri].fpi_len;
 	}
 	total_len = total_rec_len + total_fpi_len;
+
+	printf("WAL statistics between %X/%X and %X/%X:\n",
+		   LSN_FORMAT_ARGS(stats->startptr), LSN_FORMAT_ARGS(stats->endptr));
 
 	/*
 	 * 27 is strlen("Transaction/COMMIT_PREPARED"), 20 is strlen(2^64), 8 is
@@ -782,6 +820,10 @@ main(int argc, char **argv)
 	int			option;
 	int			optindex = 0;
 
+#ifndef WIN32
+	pqsignal(SIGINT, sigint_handler);
+#endif
+
 	pg_logging_init(argv[0]);
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_waldump"));
 	progname = get_progname(argv[0]);
@@ -814,11 +856,15 @@ main(int argc, char **argv)
 	config.stop_after_records = -1;
 	config.already_displayed_records = 0;
 	config.follow = false;
-	config.filter_by_rmgr = -1;
+	/* filter_by_rmgr array was zeroed by memset above */
+	config.filter_by_rmgr_enabled = false;
 	config.filter_by_xid = InvalidTransactionId;
 	config.filter_by_xid_enabled = false;
 	config.stats = false;
 	config.stats_per_record = false;
+
+	stats.startptr = InvalidXLogRecPtr;
+	stats.endptr = InvalidXLogRecPtr;
 
 	if (argc <= 1)
 	{
@@ -873,12 +919,12 @@ main(int argc, char **argv)
 					{
 						if (pg_strcasecmp(optarg, RmgrDescTable[i].rm_name) == 0)
 						{
-							config.filter_by_rmgr = i;
+							config.filter_by_rmgr[i] = true;
+							config.filter_by_rmgr_enabled = true;
 							break;
 						}
 					}
-
-					if (config.filter_by_rmgr == -1)
+					if (i > RM_MAX_ID)
 					{
 						pg_log_error("resource manager \"%s\" does not exist",
 									 optarg);
@@ -1048,7 +1094,7 @@ main(int argc, char **argv)
 									  .segment_close = WALDumpCloseSegment),
 						   &private);
 	if (!xlogreader_state)
-		fatal_error("out of memory");
+		fatal_error("out of memory while allocating a WAL reading processor");
 
 	/* first find a valid recptr to start from */
 	first_record = XLogFindNextRecord(xlogreader_state, private.startptr);
@@ -1071,8 +1117,17 @@ main(int argc, char **argv)
 			   LSN_FORMAT_ARGS(first_record),
 			   (uint32) (first_record - private.startptr));
 
+	if (config.stats == true && !config.quiet)
+		stats.startptr = first_record;
+
 	for (;;)
 	{
+		if (time_to_stop)
+		{
+			/* We've been Ctrl-C'ed, so leave */
+			break;
+		}
+
 		/* try to read the next record */
 		record = XLogReadRecord(xlogreader_state, &errormsg);
 		if (!record)
@@ -1087,8 +1142,8 @@ main(int argc, char **argv)
 		}
 
 		/* apply all specified filters */
-		if (config.filter_by_rmgr != -1 &&
-			config.filter_by_rmgr != record->xl_rmid)
+		if (config.filter_by_rmgr_enabled &&
+			!config.filter_by_rmgr[record->xl_rmid])
 			continue;
 
 		if (config.filter_by_xid_enabled &&
@@ -1099,7 +1154,10 @@ main(int argc, char **argv)
 		if (!config.quiet)
 		{
 			if (config.stats == true)
+			{
 				XLogDumpCountRecord(&config, &stats, xlogreader_state);
+				stats.endptr = xlogreader_state->EndRecPtr;
+			}
 			else
 				XLogDumpDisplayRecord(&config, xlogreader_state);
 		}
@@ -1113,6 +1171,9 @@ main(int argc, char **argv)
 
 	if (config.stats == true && !config.quiet)
 		XLogDumpDisplayStats(&config, &stats);
+
+	if (time_to_stop)
+		exit(0);
 
 	if (errormsg)
 		fatal_error("error in WAL record at %X/%X: %s",

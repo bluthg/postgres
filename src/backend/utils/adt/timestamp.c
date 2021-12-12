@@ -2352,20 +2352,17 @@ static inline INT128
 interval_cmp_value(const Interval *interval)
 {
 	INT128		span;
-	int64		dayfraction;
 	int64		days;
 
 	/*
-	 * Separate time field into days and dayfraction, then add the month and
-	 * day fields to the days part.  We cannot overflow int64 days here.
+	 * Combine the month and day fields into an integral number of days.
+	 * Because the inputs are int32, int64 arithmetic suffices here.
 	 */
-	dayfraction = interval->time % USECS_PER_DAY;
-	days = interval->time / USECS_PER_DAY;
-	days += interval->month * INT64CONST(30);
+	days = interval->month * INT64CONST(30);
 	days += interval->day;
 
-	/* Widen dayfraction to 128 bits */
-	span = int64_to_int128(dayfraction);
+	/* Widen time field to 128 bits */
+	span = int64_to_int128(interval->time);
 
 	/* Scale up days to microseconds, forming a 128-bit product */
 	int128_add_int64_mul_int64(&span, days, USECS_PER_DAY);
@@ -3843,8 +3840,20 @@ timestamp_bin(PG_FUNCTION_ARGS)
 
 	stride_usecs = stride->day * USECS_PER_DAY + stride->time;
 
+	if (stride_usecs <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("stride must be greater than zero")));
+
 	tm_diff = timestamp - origin;
 	tm_delta = tm_diff - tm_diff % stride_usecs;
+
+	/*
+	 * Make sure the returned timestamp is at the start of the bin, even if
+	 * the origin is in the future.
+	 */
+	if (origin > timestamp && stride_usecs > 1)
+		tm_delta -= stride_usecs;
 
 	result = origin + tm_delta;
 
@@ -4014,8 +4023,20 @@ timestamptz_bin(PG_FUNCTION_ARGS)
 
 	stride_usecs = stride->day * USECS_PER_DAY + stride->time;
 
+	if (stride_usecs <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("stride must be greater than zero")));
+
 	tm_diff = timestamp - origin;
 	tm_delta = tm_diff - tm_diff % stride_usecs;
+
+	/*
+	 * Make sure the returned timestamp is at the start of the bin, even if
+	 * the origin is in the future.
+	 */
+	if (origin > timestamp && stride_usecs > 1)
+		tm_delta -= stride_usecs;
 
 	result = origin + tm_delta;
 
@@ -4662,7 +4683,7 @@ timestamp_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 		switch (val)
 		{
 			case DTK_MICROSEC:
-				intresult = tm->tm_sec * 1000000.0 + fsec;
+				intresult = tm->tm_sec * INT64CONST(1000000) + fsec;
 				break;
 
 			case DTK_MILLISEC:
@@ -4671,7 +4692,7 @@ timestamp_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 					 * tm->tm_sec * 1000 + fsec / 1000
 					 * = (tm->tm_sec * 1'000'000 + fsec) / 1000
 					 */
-					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * 1000000LL + fsec, 3));
+					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * INT64CONST(1000000) + fsec, 3));
 				else
 					PG_RETURN_FLOAT8(tm->tm_sec * 1000.0 + fsec / 1000.0);
 				break;
@@ -4682,7 +4703,7 @@ timestamp_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 					 * tm->tm_sec + fsec / 1'000'000
 					 * = (tm->tm_sec * 1'000'000 + fsec) / 1'000'000
 					 */
-					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * 1000000LL + fsec, 6));
+					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * INT64CONST(1000000) + fsec, 6));
 				else
 					PG_RETURN_FLOAT8(tm->tm_sec + fsec / 1000000.0);
 				break;
@@ -4758,8 +4779,8 @@ timestamp_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 			case DTK_JULIAN:
 				if (retnumeric)
 					PG_RETURN_NUMERIC(numeric_add_opt_error(int64_to_numeric(date2j(tm->tm_year, tm->tm_mon, tm->tm_mday)),
-															numeric_div_opt_error(int64_to_numeric(((((tm->tm_hour * MINS_PER_HOUR) + tm->tm_min) * SECS_PER_MINUTE) + tm->tm_sec) * 1000000LL + fsec),
-																				  int64_to_numeric(SECS_PER_DAY * 1000000LL),
+															numeric_div_opt_error(int64_to_numeric(((((tm->tm_hour * MINS_PER_HOUR) + tm->tm_min) * SECS_PER_MINUTE) + tm->tm_sec) * INT64CONST(1000000) + fsec),
+																				  int64_to_numeric(SECS_PER_DAY * INT64CONST(1000000)),
 																				  NULL),
 															NULL));
 				else
@@ -4948,7 +4969,7 @@ timestamptz_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 				break;
 
 			case DTK_MICROSEC:
-				intresult = tm->tm_sec * 1000000 + fsec;
+				intresult = tm->tm_sec * INT64CONST(1000000) + fsec;
 				break;
 
 			case DTK_MILLISEC:
@@ -4957,7 +4978,7 @@ timestamptz_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 					 * tm->tm_sec * 1000 + fsec / 1000
 					 * = (tm->tm_sec * 1'000'000 + fsec) / 1000
 					 */
-					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * 1000000LL + fsec, 3));
+					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * INT64CONST(1000000) + fsec, 3));
 				else
 					PG_RETURN_FLOAT8(tm->tm_sec * 1000.0 + fsec / 1000.0);
 				break;
@@ -4968,7 +4989,7 @@ timestamptz_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 					 * tm->tm_sec + fsec / 1'000'000
 					 * = (tm->tm_sec * 1'000'000 + fsec) / 1'000'000
 					 */
-					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * 1000000LL + fsec, 6));
+					PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * INT64CONST(1000000) + fsec, 6));
 				else
 					PG_RETURN_FLOAT8(tm->tm_sec + fsec / 1000000.0);
 				break;
@@ -5032,8 +5053,8 @@ timestamptz_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 			case DTK_JULIAN:
 				if (retnumeric)
 					PG_RETURN_NUMERIC(numeric_add_opt_error(int64_to_numeric(date2j(tm->tm_year, tm->tm_mon, tm->tm_mday)),
-															numeric_div_opt_error(int64_to_numeric(((((tm->tm_hour * MINS_PER_HOUR) + tm->tm_min) * SECS_PER_MINUTE) + tm->tm_sec) * 1000000LL + fsec),
-																				  int64_to_numeric(SECS_PER_DAY * 1000000LL),
+															numeric_div_opt_error(int64_to_numeric(((((tm->tm_hour * MINS_PER_HOUR) + tm->tm_min) * SECS_PER_MINUTE) + tm->tm_sec) * INT64CONST(1000000) + fsec),
+																				  int64_to_numeric(SECS_PER_DAY * INT64CONST(1000000)),
 																				  NULL),
 															NULL));
 				else
@@ -5177,7 +5198,7 @@ interval_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 			switch (val)
 			{
 				case DTK_MICROSEC:
-					intresult = tm->tm_sec * 1000000 + fsec;
+					intresult = tm->tm_sec * INT64CONST(1000000) + fsec;
 					break;
 
 				case DTK_MILLISEC:
@@ -5186,7 +5207,7 @@ interval_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 						 * tm->tm_sec * 1000 + fsec / 1000
 						 * = (tm->tm_sec * 1'000'000 + fsec) / 1000
 						 */
-						PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * 1000000LL + fsec, 3));
+						PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * INT64CONST(1000000) + fsec, 3));
 					else
 						PG_RETURN_FLOAT8(tm->tm_sec * 1000.0 + fsec / 1000.0);
 					break;
@@ -5197,7 +5218,7 @@ interval_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 						 * tm->tm_sec + fsec / 1'000'000
 						 * = (tm->tm_sec * 1'000'000 + fsec) / 1'000'000
 						 */
-						PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * 1000000LL + fsec, 6));
+						PG_RETURN_NUMERIC(int64_div_fast_to_numeric(tm->tm_sec * INT64CONST(1000000) + fsec, 6));
 					else
 						PG_RETURN_FLOAT8(tm->tm_sec + fsec / 1000000.0);
 					break;

@@ -33,11 +33,6 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "pg_getopt.h"
-#include "pgstat.h"
-#include "postmaster/bgwriter.h"
-#include "postmaster/startup.h"
-#include "postmaster/walwriter.h"
-#include "replication/walreceiver.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/condition_variable.h"
@@ -47,7 +42,6 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/memutils.h"
-#include "utils/ps_status.h"
 #include "utils/rel.h"
 #include "utils/relmapper.h"
 
@@ -55,9 +49,7 @@ uint32		bootstrap_data_checksum_version = 0;	/* No checksum */
 
 
 static void CheckerModeMain(void);
-static void BootstrapModeMain(void);
 static void bootstrap_signals(void);
-static void ShutdownAuxiliaryProcess(int code, Datum arg);
 static Form_pg_attribute AllocateAttribute(void);
 static void populate_typ_list(void);
 static Oid	gettype(char *type);
@@ -67,8 +59,6 @@ static void cleanup(void);
  *		global variables
  * ----------------
  */
-
-AuxProcType MyAuxProcType = NotAnAuxProcess;	/* declared in miscadmin.h */
 
 Relation	boot_reldesc;		/* current relation descriptor */
 
@@ -160,7 +150,7 @@ struct typmap
 	FormData_pg_type am_typ;
 };
 
-static List *Typ = NIL; /* List of struct typmap* */
+static List *Typ = NIL;			/* List of struct typmap* */
 static struct typmap *Ap = NULL;
 
 static Datum values[MAXATTR];	/* current row's attribute values */
@@ -186,46 +176,52 @@ static IndexList *ILHead = NULL;
 
 
 /*
- *	 AuxiliaryProcessMain
+ * In shared memory checker mode, all we really want to do is create shared
+ * memory and semaphores (just to prove we can do it with the current GUC
+ * settings).  Since, in fact, that was already done by
+ * CreateSharedMemoryAndSemaphores(), we have nothing more to do here.
+ */
+static void
+CheckerModeMain(void)
+{
+	proc_exit(0);
+}
+
+/*
+ *	 The main entry point for running the backend in bootstrap mode
  *
- *	 The main entry point for auxiliary processes, such as the bgwriter,
- *	 walwriter, walreceiver, bootstrapper and the shared memory checker code.
+ *	 The bootstrap mode is used to initialize the template database.
+ *	 The bootstrap backend doesn't speak SQL, but instead expects
+ *	 commands in a special bootstrap language.
  *
- *	 This code is here just because of historical reasons.
+ *	 When check_only is true, startup is done only far enough to verify that
+ *	 the current configuration, particularly the passed in options pertaining
+ *	 to shared memory sizing, options work (or at least do not cause an error
+ *	 up to shared memory creation).
  */
 void
-AuxiliaryProcessMain(int argc, char *argv[])
+BootstrapModeMain(int argc, char *argv[], bool check_only)
 {
+	int			i;
 	char	   *progname = argv[0];
 	int			flag;
 	char	   *userDoption = NULL;
 
-	/*
-	 * Initialize process environment (already done if under postmaster, but
-	 * not if standalone).
-	 */
-	if (!IsUnderPostmaster)
-		InitStandaloneProcess(argv[0]);
+	Assert(!IsUnderPostmaster);
 
-	/*
-	 * process command arguments
-	 */
+	InitStandaloneProcess(argv[0]);
 
 	/* Set defaults, to be overridden by explicit options below */
-	if (!IsUnderPostmaster)
-		InitializeGUCOptions();
+	InitializeGUCOptions();
 
-	/* Ignore the initial --boot argument, if present */
-	if (argc > 1 && strcmp(argv[1], "--boot") == 0)
-	{
-		argv++;
-		argc--;
-	}
+	/* an initial --boot or --check should be present */
+	Assert(argc > 1
+		   && (strcmp(argv[1], "--boot") == 0
+			   || strcmp(argv[1], "--check") == 0));
+	argv++;
+	argc--;
 
-	/* If no -x argument, we are a CheckerProcess */
-	MyAuxProcType = CheckerProcess;
-
-	while ((flag = getopt(argc, argv, "B:c:d:D:Fkr:x:X:-:")) != -1)
+	while ((flag = getopt(argc, argv, "B:c:d:D:Fkr:X:-:")) != -1)
 	{
 		switch (flag)
 		{
@@ -256,9 +252,6 @@ AuxiliaryProcessMain(int argc, char *argv[])
 				break;
 			case 'r':
 				strlcpy(OutputFileName, optarg, MAXPGPATH);
-				break;
-			case 'x':
-				MyAuxProcType = atoi(optarg);
 				break;
 			case 'X':
 				{
@@ -313,193 +306,47 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		proc_exit(1);
 	}
 
-	switch (MyAuxProcType)
-	{
-		case StartupProcess:
-			MyBackendType = B_STARTUP;
-			break;
-		case ArchiverProcess:
-			MyBackendType = B_ARCHIVER;
-			break;
-		case BgWriterProcess:
-			MyBackendType = B_BG_WRITER;
-			break;
-		case CheckpointerProcess:
-			MyBackendType = B_CHECKPOINTER;
-			break;
-		case WalWriterProcess:
-			MyBackendType = B_WAL_WRITER;
-			break;
-		case WalReceiverProcess:
-			MyBackendType = B_WAL_RECEIVER;
-			break;
-		default:
-			MyBackendType = B_INVALID;
-	}
-	if (IsUnderPostmaster)
-		init_ps_display(NULL);
-
-	/* Acquire configuration parameters, unless inherited from postmaster */
-	if (!IsUnderPostmaster)
-	{
-		if (!SelectConfigFiles(userDoption, progname))
-			proc_exit(1);
-	}
+	/* Acquire configuration parameters */
+	if (!SelectConfigFiles(userDoption, progname))
+		proc_exit(1);
 
 	/*
 	 * Validate we have been given a reasonable-looking DataDir and change
-	 * into it (if under postmaster, should be done already).
+	 * into it
 	 */
-	if (!IsUnderPostmaster)
-	{
-		checkDataDir();
-		ChangeToDataDir();
-	}
+	checkDataDir();
+	ChangeToDataDir();
 
-	/* If standalone, create lockfile for data directory */
-	if (!IsUnderPostmaster)
-		CreateDataDirLockFile(false);
+	CreateDataDirLockFile(false);
 
 	SetProcessingMode(BootstrapProcessing);
 	IgnoreSystemIndexes = true;
 
-	/* Initialize MaxBackends (if under postmaster, was done already) */
-	if (!IsUnderPostmaster)
-		InitializeMaxBackends();
+	InitializeMaxBackends();
+
+	CreateSharedMemoryAndSemaphores();
+
+	/*
+	 * XXX: It might make sense to move this into its own function at some
+	 * point. Right now it seems like it'd cause more code duplication than
+	 * it's worth.
+	 */
+	if (check_only)
+	{
+		SetProcessingMode(NormalProcessing);
+		CheckerModeMain();
+		abort();
+	}
+
+	/*
+	 * Do backend-like initialization for bootstrap mode
+	 */
+	InitProcess();
 
 	BaseInit();
 
-	/*
-	 * When we are an auxiliary process, we aren't going to do the full
-	 * InitPostgres pushups, but there are a couple of things that need to get
-	 * lit up even in an auxiliary process.
-	 */
-	if (IsUnderPostmaster)
-	{
-		/*
-		 * Create a PGPROC so we can use LWLocks.  In the EXEC_BACKEND case,
-		 * this was already done by SubPostmasterMain().
-		 */
-#ifndef EXEC_BACKEND
-		InitAuxiliaryProcess();
-#endif
-
-		/*
-		 * Assign the ProcSignalSlot for an auxiliary process.  Since it
-		 * doesn't have a BackendId, the slot is statically allocated based on
-		 * the auxiliary process type (MyAuxProcType).  Backends use slots
-		 * indexed in the range from 1 to MaxBackends (inclusive), so we use
-		 * MaxBackends + AuxProcType + 1 as the index of the slot for an
-		 * auxiliary process.
-		 *
-		 * This will need rethinking if we ever want more than one of a
-		 * particular auxiliary process type.
-		 */
-		ProcSignalInit(MaxBackends + MyAuxProcType + 1);
-
-		/* finish setting up bufmgr.c */
-		InitBufferPoolBackend();
-
-		/*
-		 * Auxiliary processes don't run transactions, but they may need a
-		 * resource owner anyway to manage buffer pins acquired outside
-		 * transactions (and, perhaps, other things in future).
-		 */
-		CreateAuxProcessResourceOwner();
-
-		/* Initialize statistics reporting */
-		pgstat_initialize();
-
-		/* Initialize backend status information */
-		pgstat_beinit();
-		pgstat_bestart();
-
-		/* register a before-shutdown callback for LWLock cleanup */
-		before_shmem_exit(ShutdownAuxiliaryProcess, 0);
-	}
-
-	/*
-	 * XLOG operations
-	 */
-	SetProcessingMode(NormalProcessing);
-
-	switch (MyAuxProcType)
-	{
-		case CheckerProcess:
-			/* don't set signals, they're useless here */
-			CheckerModeMain();
-			proc_exit(1);		/* should never return */
-
-		case BootstrapProcess:
-
-			/*
-			 * There was a brief instant during which mode was Normal; this is
-			 * okay.  We need to be in bootstrap mode during BootStrapXLOG for
-			 * the sake of multixact initialization.
-			 */
-			SetProcessingMode(BootstrapProcessing);
-			bootstrap_signals();
-			BootStrapXLOG();
-			BootstrapModeMain();
-			proc_exit(1);		/* should never return */
-
-		case StartupProcess:
-			StartupProcessMain();
-			proc_exit(1);
-
-		case ArchiverProcess:
-			PgArchiverMain();
-			proc_exit(1);
-
-		case BgWriterProcess:
-			BackgroundWriterMain();
-			proc_exit(1);
-
-		case CheckpointerProcess:
-			CheckpointerMain();
-			proc_exit(1);
-
-		case WalWriterProcess:
-			InitXLOGAccess();
-			WalWriterMain();
-			proc_exit(1);
-
-		case WalReceiverProcess:
-			WalReceiverMain();
-			proc_exit(1);
-
-		default:
-			elog(PANIC, "unrecognized process type: %d", (int) MyAuxProcType);
-			proc_exit(1);
-	}
-}
-
-/*
- * In shared memory checker mode, all we really want to do is create shared
- * memory and semaphores (just to prove we can do it with the current GUC
- * settings).  Since, in fact, that was already done by BaseInit(),
- * we have nothing more to do here.
- */
-static void
-CheckerModeMain(void)
-{
-	proc_exit(0);
-}
-
-/*
- *	 The main entry point for running the backend in bootstrap mode
- *
- *	 The bootstrap mode is used to initialize the template database.
- *	 The bootstrap backend doesn't speak SQL, but instead expects
- *	 commands in a special bootstrap language.
- */
-static void
-BootstrapModeMain(void)
-{
-	int			i;
-
-	Assert(!IsUnderPostmaster);
-	Assert(IsBootstrapProcessingMode());
+	bootstrap_signals();
+	BootStrapXLOG();
 
 	/*
 	 * To ensure that src/common/link-canary.c is linked into the backend, we
@@ -507,11 +354,6 @@ BootstrapModeMain(void)
 	 */
 	if (pg_link_canary_is_frontend())
 		elog(ERROR, "backend is incorrectly linked to frontend functions");
-
-	/*
-	 * Do backend-like initialization for bootstrap mode
-	 */
-	InitProcess();
 
 	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL, false);
 
@@ -563,21 +405,6 @@ bootstrap_signals(void)
 	pqsignal(SIGINT, SIG_DFL);
 	pqsignal(SIGTERM, SIG_DFL);
 	pqsignal(SIGQUIT, SIG_DFL);
-}
-
-/*
- * Begin shutdown of an auxiliary process.  This is approximately the equivalent
- * of ShutdownPostgres() in postinit.c.  We can't run transactions in an
- * auxiliary process, so most of the work of AbortTransaction() is not needed,
- * but we do need to make sure we've released any LWLocks we are holding.
- * (This is only critical during an error exit.)
- */
-static void
-ShutdownAuxiliaryProcess(int code, Datum arg)
-{
-	LWLockReleaseAll();
-	ConditionVariableCancelSleep();
-	pgstat_report_wait_end();
 }
 
 /* ----------------------------------------------------------------
@@ -699,8 +526,9 @@ DefineAttr(char *name, char *type, int attnum, int nullness)
 		attrtypes[attnum]->atttypid = Ap->am_oid;
 		attrtypes[attnum]->attlen = Ap->am_typ.typlen;
 		attrtypes[attnum]->attbyval = Ap->am_typ.typbyval;
-		attrtypes[attnum]->attstorage = Ap->am_typ.typstorage;
 		attrtypes[attnum]->attalign = Ap->am_typ.typalign;
+		attrtypes[attnum]->attstorage = Ap->am_typ.typstorage;
+		attrtypes[attnum]->attcompression = InvalidCompressionMethod;
 		attrtypes[attnum]->attcollation = Ap->am_typ.typcollation;
 		/* if an array type, assume 1-dimensional attribute */
 		if (Ap->am_typ.typelem != InvalidOid && Ap->am_typ.typlen < 0)
@@ -713,8 +541,9 @@ DefineAttr(char *name, char *type, int attnum, int nullness)
 		attrtypes[attnum]->atttypid = TypInfo[typeoid].oid;
 		attrtypes[attnum]->attlen = TypInfo[typeoid].len;
 		attrtypes[attnum]->attbyval = TypInfo[typeoid].byval;
-		attrtypes[attnum]->attstorage = TypInfo[typeoid].storage;
 		attrtypes[attnum]->attalign = TypInfo[typeoid].align;
+		attrtypes[attnum]->attstorage = TypInfo[typeoid].storage;
+		attrtypes[attnum]->attcompression = InvalidCompressionMethod;
 		attrtypes[attnum]->attcollation = TypInfo[typeoid].collation;
 		/* if an array type, assume 1-dimensional attribute */
 		if (TypInfo[typeoid].elem != InvalidOid &&
@@ -737,10 +566,6 @@ DefineAttr(char *name, char *type, int attnum, int nullness)
 	attrtypes[attnum]->attcacheoff = -1;
 	attrtypes[attnum]->atttypmod = -1;
 	attrtypes[attnum]->attislocal = true;
-	if (IsStorageCompressible(attrtypes[attnum]->attstorage))
-		attrtypes[attnum]->attcompression = GetDefaultToastCompression();
-	else
-		attrtypes[attnum]->attcompression = InvalidCompressionMethod;
 
 	if (nullness == BOOTCOL_NULL_FORCE_NOT_NULL)
 	{
@@ -926,11 +751,12 @@ gettype(char *type)
 {
 	if (Typ != NIL)
 	{
-		ListCell *lc;
+		ListCell   *lc;
 
-		foreach (lc, Typ)
+		foreach(lc, Typ)
 		{
 			struct typmap *app = lfirst(lc);
+
 			if (strncmp(NameStr(app->am_typ.typname), type, NAMEDATALEN) == 0)
 			{
 				Ap = app;
@@ -948,12 +774,13 @@ gettype(char *type)
 		populate_typ_list();
 
 		/*
-		 * Calling gettype would result in infinite recursion for types missing
-		 * in pg_type, so just repeat the lookup.
+		 * Calling gettype would result in infinite recursion for types
+		 * missing in pg_type, so just repeat the lookup.
 		 */
-		foreach (lc, Typ)
+		foreach(lc, Typ)
 		{
 			struct typmap *app = lfirst(lc);
+
 			if (strncmp(NameStr(app->am_typ.typname), type, NAMEDATALEN) == 0)
 			{
 				Ap = app;
@@ -1004,9 +831,9 @@ boot_get_type_io_data(Oid typid,
 	{
 		/* We have the boot-time contents of pg_type, so use it */
 		struct typmap *ap = NULL;
-		ListCell *lc;
+		ListCell   *lc;
 
-		foreach (lc, Typ)
+		foreach(lc, Typ)
 		{
 			ap = lfirst(lc);
 			if (ap->am_oid == typid)

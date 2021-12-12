@@ -14,7 +14,6 @@
 #ifndef RELCACHE_H
 #define RELCACHE_H
 
-#include "postgres.h"
 #include "access/tupdesc.h"
 #include "nodes/bitmapset.h"
 
@@ -56,14 +55,16 @@ extern bytea **RelationGetIndexAttOptions(Relation relation, bool copy);
 
 typedef enum IndexAttrBitmapKind
 {
-	INDEX_ATTR_BITMAP_ALL,
 	INDEX_ATTR_BITMAP_KEY,
 	INDEX_ATTR_BITMAP_PRIMARY_KEY,
-	INDEX_ATTR_BITMAP_IDENTITY_KEY
+	INDEX_ATTR_BITMAP_IDENTITY_KEY,
+	INDEX_ATTR_BITMAP_HOT_BLOCKING
 } IndexAttrBitmapKind;
 
 extern Bitmapset *RelationGetIndexAttrBitmap(Relation relation,
 											 IndexAttrBitmapKind attrKind);
+
+extern Bitmapset *RelationGetIdentityKeyBitmap(Relation relation);
 
 extern void RelationGetExclusionInfo(Relation indexRelation,
 									 Oid **operators,
@@ -121,7 +122,7 @@ extern void RelationForgetRelation(Oid rid);
 
 extern void RelationCacheInvalidateEntry(Oid relationId);
 
-extern void RelationCacheInvalidate(void);
+extern void RelationCacheInvalidate(bool debug_discard);
 
 extern void RelationCloseSmgrByOid(Oid relationId);
 

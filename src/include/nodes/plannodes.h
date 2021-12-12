@@ -120,7 +120,7 @@ typedef struct Plan
 	/*
 	 * planner's estimate of result size of this plan step
 	 */
-	double		plan_rows;		/* number of rows plan is expected to emit */
+	Cardinality	plan_rows;		/* number of rows plan is expected to emit */
 	int			plan_width;		/* average row width in bytes */
 
 	/*
@@ -132,7 +132,7 @@ typedef struct Plan
 	/*
 	 * information needed for asynchronous execution
 	 */
-	bool		async_capable; 	/* engage asynchronous-capable logic? */
+	bool		async_capable;	/* engage asynchronous-capable logic? */
 
 	/*
 	 * Common structural data for all Plan types.
@@ -232,7 +232,8 @@ typedef struct ModifyTable
 	int			epqParam;		/* ID of Param for EvalPlanQual re-eval */
 	OnConflictAction onConflictAction;	/* ON CONFLICT action */
 	List	   *arbiterIndexes; /* List of ON CONFLICT arbiter index OIDs  */
-	List	   *onConflictSet;	/* SET for INSERT ON CONFLICT DO UPDATE */
+	List	   *onConflictSet;	/* INSERT ON CONFLICT DO UPDATE targetlist */
+	List	   *onConflictCols; /* target column numbers for onConflictSet */
 	Node	   *onConflictWhere;	/* WHERE for ON CONFLICT UPDATE */
 	Index		exclRelRTI;		/* RTI of the EXCLUDED pseudo relation */
 	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
@@ -347,7 +348,10 @@ typedef struct Scan
  *		sequential scan node
  * ----------------
  */
-typedef Scan SeqScan;
+typedef struct SeqScan
+{
+	Scan		scan;
+} SeqScan;
 
 /* ----------------
  *		table sample scan node
@@ -780,10 +784,10 @@ typedef struct Material
 } Material;
 
 /* ----------------
- *		result cache node
+ *		memoize node
  * ----------------
  */
-typedef struct ResultCache
+typedef struct Memoize
 {
 	Plan		plan;
 
@@ -795,10 +799,13 @@ typedef struct ResultCache
 	bool		singlerow;		/* true if the cache entry should be marked as
 								 * complete after we store the first tuple in
 								 * it. */
+	bool		binary_mode;	/* true when cache key should be compared bit
+								 * by bit, false when using hash equality ops */
 	uint32		est_entries;	/* The maximum number of entries that the
 								 * planner expects will fit in the cache, or 0
 								 * if unknown */
-} ResultCache;
+	Bitmapset   *keyparamids;	/* paramids from param_exprs */
+} Memoize;
 
 /* ----------------
  *		sort node
@@ -972,7 +979,7 @@ typedef struct Hash
 	AttrNumber	skewColumn;		/* outer join key's column #, or zero */
 	bool		skewInherit;	/* is outer join rel an inheritance tree? */
 	/* all other info is in the parent HashJoin node */
-	double		rows_total;		/* estimate total rows if parallel_aware */
+	Cardinality	rows_total;		/* estimate total rows if parallel_aware */
 } Hash;
 
 /* ----------------
@@ -1085,9 +1092,9 @@ typedef enum RowMarkType
  * When the planner discovers that a relation is the root of an inheritance
  * tree, it sets isParent true, and adds an additional PlanRowMark to the
  * list for each child relation (including the target rel itself in its role
- * as a child).  isParent is also set to true for the partitioned child
- * relations, which are not scanned just like the root parent.  The child
- * entries have rti == child rel's RT index and prti == parent's RT index,
+ * as a child, if it is not a partitioned table).  Any non-leaf partitioned
+ * child relations will also have entries with isParent = true.  The child
+ * entries have rti == child rel's RT index and prti == top parent's RT index,
  * and can therefore be recognized as children by the fact that prti != rti.
  * The parent's allMarkTypes field gets the OR of (1<<markType) across all
  * its children (this definition allows children to use different markTypes).
@@ -1108,8 +1115,7 @@ typedef enum RowMarkType
  * means we needn't renumber rowmarkIds when flattening subqueries, which
  * would require finding and renaming the resjunk columns as well.)
  * Note this means that all tables in an inheritance hierarchy share the
- * same resjunk column names.  However, in an inherited UPDATE/DELETE the
- * columns could have different physical column numbers in each subplan.
+ * same resjunk column names.
  */
 typedef struct PlanRowMark
 {
@@ -1215,7 +1221,7 @@ typedef struct PartitionPruneStep
 } PartitionPruneStep;
 
 /*
- * PartitionPruneStepOp - Information to prune using a set of mutually AND'd
+ * PartitionPruneStepOp - Information to prune using a set of mutually ANDed
  *							OpExpr clauses
  *
  * This contains information extracted from up to partnatts OpExpr clauses,

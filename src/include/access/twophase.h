@@ -34,6 +34,8 @@ extern void TwoPhaseShmemInit(void);
 extern void AtAbort_Twophase(void);
 extern void PostPrepare_Twophase(void);
 
+extern TransactionId TwoPhaseGetXidByVirtualXID(VirtualTransactionId vxid,
+												bool *have_more);
 extern PGPROC *TwoPhaseGetDummyProc(TransactionId xid, bool lock_held);
 extern BackendId TwoPhaseGetDummyBackendId(TransactionId xid, bool lock_held);
 
@@ -58,4 +60,6 @@ extern void PrepareRedoAdd(char *buf, XLogRecPtr start_lsn,
 						   XLogRecPtr end_lsn, RepOriginId origin_id);
 extern void PrepareRedoRemove(TransactionId xid, bool giveWarning);
 extern void restoreTwoPhaseData(void);
+extern bool LookupGXact(const char *gid, XLogRecPtr prepare_at_lsn,
+						TimestampTz origin_prepare_timestamp);
 #endif							/* TWOPHASE_H */

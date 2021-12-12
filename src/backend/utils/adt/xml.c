@@ -221,7 +221,7 @@ const TableFuncRoutine XmlTableRoutine =
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED), \
 			 errmsg("unsupported XML feature"), \
 			 errdetail("This functionality requires the server to be built with libxml support."), \
-			 errhint("You need to rebuild PostgreSQL using --with-libxml.")))
+			 errhint("You need to rebuild PostgreSQL using %s.", "--with-libxml")))
 
 
 /* from SQL/XML:2008 section 4.9 */
@@ -959,8 +959,8 @@ pg_xml_init_library(void)
 		if (sizeof(char) != sizeof(xmlChar))
 			ereport(ERROR,
 					(errmsg("could not initialize XML library"),
-					 errdetail("libxml2 has incompatible char type: sizeof(char)=%u, sizeof(xmlChar)=%u.",
-							   (int) sizeof(char), (int) sizeof(xmlChar))));
+					 errdetail("libxml2 has incompatible char type: sizeof(char)=%zu, sizeof(xmlChar)=%zu.",
+							   sizeof(char), sizeof(xmlChar))));
 
 #ifdef USE_LIBXMLCONTEXT
 		/* Set up libxml's memory allocation our way */
@@ -3637,8 +3637,8 @@ map_sql_type_to_xmlschema_type(Oid typeoid, int typmod)
 								 "    <xsd:maxInclusive value=\"" INT64_FORMAT "\"/>\n"
 								 "    <xsd:minInclusive value=\"" INT64_FORMAT "\"/>\n"
 								 "  </xsd:restriction>\n",
-								 (((uint64) 1) << (sizeof(int64) * 8 - 1)) - 1,
-								 (((uint64) 1) << (sizeof(int64) * 8 - 1)));
+								 PG_INT64_MAX,
+								 PG_INT64_MIN);
 				break;
 
 			case FLOAT4OID:

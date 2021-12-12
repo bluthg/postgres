@@ -44,12 +44,22 @@ ForeignNext(ForeignScanState *node)
 	TupleTableSlot *slot;
 	ForeignScan *plan = (ForeignScan *) node->ss.ps.plan;
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+	EState	   *estate = node->ss.ps.state;
 	MemoryContext oldcontext;
 
 	/* Call the Iterate function in short-lived context */
 	oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
 	if (plan->operation != CMD_SELECT)
+	{
+		/*
+		 * direct modifications cannot be re-evaluated, so shouldn't get here
+		 * during EvalPlanQual processing
+		 */
+		if (estate->es_epq_active != NULL)
+			elog(ERROR, "cannot re-evaluate a Foreign Update or Delete during EvalPlanQual");
+
 		slot = node->fdwroutine->IterateDirectModify(node);
+	}
 	else
 		slot = node->fdwroutine->IterateForeignScan(node);
 	MemoryContextSwitchTo(oldcontext);
@@ -128,7 +138,7 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	ForeignScanState *scanstate;
 	Relation	currentRelation = NULL;
 	Index		scanrelid = node->scan.scanrelid;
-	Index		tlistvarno;
+	int			tlistvarno;
 	FdwRoutine *fdwroutine;
 
 	/* check for unsupported flags */
@@ -210,17 +220,38 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 		ExecInitQual(node->fdw_recheck_quals, (PlanState *) scanstate);
 
 	/*
+	 * Determine whether to scan the foreign relation asynchronously or not;
+	 * this has to be kept in sync with the code in ExecInitAppend().
+	 */
+	scanstate->ss.ps.async_capable = (((Plan *) node)->async_capable &&
+									  estate->es_epq_active == NULL);
+
+	/*
 	 * Initialize FDW-related state.
 	 */
 	scanstate->fdwroutine = fdwroutine;
 	scanstate->fdw_state = NULL;
 
 	/*
-	 * For the FDW's convenience, look up the modification target relation's.
-	 * ResultRelInfo.
+	 * For the FDW's convenience, look up the modification target relation's
+	 * ResultRelInfo.  The ModifyTable node should have initialized it for us,
+	 * see ExecInitModifyTable.
+	 *
+	 * Don't try to look up the ResultRelInfo when EvalPlanQual is active,
+	 * though.  Direct modififications cannot be re-evaluated as part of
+	 * EvalPlanQual.  The lookup wouldn't work anyway because during
+	 * EvalPlanQual processing, EvalPlanQual only initializes the subtree
+	 * under the ModifyTable, and doesn't run ExecInitModifyTable.
 	 */
-	if (node->resultRelation > 0)
+	if (node->resultRelation > 0 && estate->es_epq_active == NULL)
+	{
+		if (estate->es_result_relations == NULL ||
+			estate->es_result_relations[node->resultRelation - 1] == NULL)
+		{
+			elog(ERROR, "result relation not initialized");
+		}
 		scanstate->resultRelInfo = estate->es_result_relations[node->resultRelation - 1];
+	}
 
 	/* Initialize any outer plan. */
 	if (outerPlan(node))
@@ -231,7 +262,16 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	 * Tell the FDW to initialize the scan.
 	 */
 	if (node->operation != CMD_SELECT)
-		fdwroutine->BeginDirectModify(scanstate, eflags);
+	{
+		/*
+		 * Direct modifications cannot be re-evaluated by EvalPlanQual, so
+		 * don't bother preparing the FDW.  There can be ForeignScan nodes in
+		 * the EvalPlanQual subtree, but ExecForeignScan should never be
+		 * called on them when EvalPlanQual is active.
+		 */
+		if (estate->es_epq_active == NULL)
+			fdwroutine->BeginDirectModify(scanstate, eflags);
+	}
 	else
 		fdwroutine->BeginForeignScan(scanstate, eflags);
 
@@ -248,10 +288,14 @@ void
 ExecEndForeignScan(ForeignScanState *node)
 {
 	ForeignScan *plan = (ForeignScan *) node->ss.ps.plan;
+	EState	   *estate = node->ss.ps.state;
 
 	/* Let the FDW shut down */
 	if (plan->operation != CMD_SELECT)
-		node->fdwroutine->EndDirectModify(node);
+	{
+		if (estate->es_epq_active == NULL)
+			node->fdwroutine->EndDirectModify(node);
+	}
 	else
 		node->fdwroutine->EndForeignScan(node);
 

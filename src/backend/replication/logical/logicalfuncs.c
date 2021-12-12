@@ -95,15 +95,6 @@ LogicalOutputWrite(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xi
 	p->returned_rows++;
 }
 
-static void
-check_permissions(void)
-{
-	if (!superuser() && !has_rolreplication(GetUserId()))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser or replication role to use replication slots")));
-}
-
 /*
  * Helper function for the various SQL callable logical decoding functions.
  */
@@ -124,7 +115,7 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 	List	   *options = NIL;
 	DecodingOutputState *p;
 
-	check_permissions();
+	CheckSlotPermissions();
 
 	CheckLogicalDecodingRequirements();
 
@@ -217,15 +208,14 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 	rsinfo->setDesc = p->tupdesc;
 
 	/*
-	 * Compute the current end-of-wal and maintain ThisTimeLineID.
-	 * RecoveryInProgress() will update ThisTimeLineID on promotion.
+	 * Compute the current end-of-wal.
 	 */
 	if (!RecoveryInProgress())
-		end_of_wal = GetFlushRecPtr();
+		end_of_wal = GetFlushRecPtr(NULL);
 	else
-		end_of_wal = GetXLogReplayRecPtr(&ThisTimeLineID);
+		end_of_wal = GetXLogReplayRecPtr(NULL);
 
-	(void) ReplicationSlotAcquire(NameStr(*name), SAB_Error);
+	ReplicationSlotAcquire(NameStr(*name), true);
 
 	PG_TRY();
 	{
@@ -250,7 +240,7 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("can no longer get changes from replication slot \"%s\"",
 							NameStr(*name)),
-					 errdetail("This slot has never previously reserved WAL, or has been invalidated.")));
+					 errdetail("This slot has never previously reserved WAL, or it has been invalidated.")));
 
 		MemoryContextSwitchTo(oldcontext);
 
@@ -286,7 +276,7 @@ pg_logical_slot_get_changes_guts(FunctionCallInfo fcinfo, bool confirm, bool bin
 
 			record = XLogReadRecord(ctx->reader, &errm);
 			if (errm)
-				elog(ERROR, "%s", errm);
+				elog(ERROR, "could not find record for logical decoding: %s", errm);
 
 			/*
 			 * The {begin_txn,change,commit_txn}_wrapper callbacks above will

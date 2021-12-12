@@ -3340,7 +3340,7 @@ char *
 get_namespace_name_or_temp(Oid nspid)
 {
 	if (isTempNamespace(nspid))
-		return "pg_temp";
+		return pstrdup("pg_temp");
 	else
 		return get_namespace_name(nspid);
 }
@@ -3462,7 +3462,7 @@ Oid
 get_index_column_opclass(Oid index_oid, int attno)
 {
 	HeapTuple	tuple;
-	Form_pg_index rd_index PG_USED_FOR_ASSERTS_ONLY;
+	Form_pg_index rd_index;
 	Datum		datum;
 	bool		isnull;
 	oidvector  *indclass;

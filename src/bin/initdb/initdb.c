@@ -66,6 +66,7 @@
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/logging.h"
+#include "common/pg_prng.h"
 #include "common/restricted_token.h"
 #include "common/string.h"
 #include "common/username.h"
@@ -160,6 +161,7 @@ static char *dictionary_file;
 static char *info_schema_file;
 static char *features_file;
 static char *system_constraints_file;
+static char *system_functions_file;
 static char *system_views_file;
 static bool success = false;
 static bool made_new_pgdata = false;
@@ -200,6 +202,9 @@ static bool authwarning = false;
  */
 static const char *boot_options = "-F";
 static const char *backend_options = "--single -F -O -j -c search_path=pg_catalog -c exit_on_error=true";
+
+/* Additional switches to pass to backend (either boot or standalone) */
+static char *extra_options = "";
 
 static const char *const subdirs[] = {
 	"global",
@@ -876,9 +881,10 @@ choose_dsm_implementation(void)
 {
 #ifdef HAVE_SHM_OPEN
 	int			ntries = 10;
+	pg_prng_state prng_state;
 
-	/* Initialize random(); this function is its only user in this program. */
-	srandom((unsigned int) (getpid() ^ time(NULL)));
+	/* Initialize prng; this function is its only user in this program. */
+	pg_prng_seed(&prng_state, (uint64) (getpid() ^ time(NULL)));
 
 	while (ntries > 0)
 	{
@@ -886,7 +892,7 @@ choose_dsm_implementation(void)
 		char		name[64];
 		int			fd;
 
-		handle = random();
+		handle = pg_prng_uint32(&prng_state);
 		snprintf(name, 64, "/PostgreSQL.%u", handle);
 		if ((fd = shm_open(name, O_CREAT | O_RDWR | O_EXCL, 0600)) != -1)
 		{
@@ -961,12 +967,12 @@ test_config_settings(void)
 		test_buffs = MIN_BUFS_FOR_CONNS(test_conns);
 
 		snprintf(cmd, sizeof(cmd),
-				 "\"%s\" --boot -x0 %s "
+				 "\"%s\" --check %s %s "
 				 "-c max_connections=%d "
 				 "-c shared_buffers=%d "
 				 "-c dynamic_shared_memory_type=%s "
 				 "< \"%s\" > \"%s\" 2>&1",
-				 backend_exec, boot_options,
+				 backend_exec, boot_options, extra_options,
 				 test_conns, test_buffs,
 				 dynamic_shared_memory_type,
 				 DEVNULL, DEVNULL);
@@ -997,12 +1003,12 @@ test_config_settings(void)
 		}
 
 		snprintf(cmd, sizeof(cmd),
-				 "\"%s\" --boot -x0 %s "
+				 "\"%s\" --check %s %s "
 				 "-c max_connections=%d "
 				 "-c shared_buffers=%d "
 				 "-c dynamic_shared_memory_type=%s "
 				 "< \"%s\" > \"%s\" 2>&1",
-				 backend_exec, boot_options,
+				 backend_exec, boot_options, extra_options,
 				 n_connections, test_buffs,
 				 dynamic_shared_memory_type,
 				 DEVNULL, DEVNULL);
@@ -1067,7 +1073,7 @@ setup_config(void)
 	else
 		snprintf(repltok, sizeof(repltok), "shared_buffers = %dkB",
 				 n_buffers * (BLCKSZ / 1024));
-	conflines = replace_token(conflines, "#shared_buffers = 32MB", repltok);
+	conflines = replace_token(conflines, "#shared_buffers = 128MB", repltok);
 
 #ifdef HAVE_UNIX_SOCKETS
 	snprintf(repltok, sizeof(repltok), "#unix_socket_directories = '%s'",
@@ -1402,11 +1408,11 @@ bootstrap_template1(void)
 	unsetenv("PGCLIENTENCODING");
 
 	snprintf(cmd, sizeof(cmd),
-			 "\"%s\" --boot -x1 -X %u %s %s %s",
+			 "\"%s\" --boot -X %d %s %s %s %s",
 			 backend_exec,
 			 wal_segment_size_mb * (1024 * 1024),
 			 data_checksums ? "-k" : "",
-			 boot_options,
+			 boot_options, extra_options,
 			 debug ? "-d 5" : "");
 
 
@@ -1493,7 +1499,7 @@ get_su_pwd(void)
 						 pwfilename);
 			exit(1);
 		}
-		pwd1 = pg_get_line(pwf);
+		pwd1 = pg_get_line(pwf, NULL);
 		if (!pwd1)
 		{
 			if (ferror(pwf))
@@ -1521,83 +1527,10 @@ setup_depend(FILE *cmdfd)
 	const char *const *line;
 	static const char *const pg_depend_setup[] = {
 		/*
-		 * Make PIN entries in pg_depend for all objects made so far in the
-		 * tables that the dependency code handles.  This is overkill (the
-		 * system doesn't really depend on having every last weird datatype,
-		 * for instance) but generating only the minimum required set of
-		 * dependencies seems hard.
-		 *
-		 * Catalogs that are intentionally not scanned here are:
-		 *
-		 * pg_database: it's a feature, not a bug, that template1 is not
+		 * Advance the OID counter so that subsequently-created objects aren't
 		 * pinned.
-		 *
-		 * pg_extension: a pinned extension isn't really an extension, hmm?
-		 *
-		 * pg_tablespace: tablespaces don't participate in the dependency
-		 * code, and DropTableSpace() explicitly protects the built-in
-		 * tablespaces.
-		 *
-		 * First delete any already-made entries; PINs override all else, and
-		 * must be the only entries for their objects.
 		 */
-		"DELETE FROM pg_depend;\n\n",
-		"VACUUM pg_depend;\n\n",
-		"DELETE FROM pg_shdepend;\n\n",
-		"VACUUM pg_shdepend;\n\n",
-
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_class;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_proc;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_type;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_cast;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_constraint;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_conversion;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_attrdef;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_language;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_operator;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_opclass;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_opfamily;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_am;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_amop;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_amproc;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_rewrite;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_trigger;\n\n",
-
-		/*
-		 * restriction here to avoid pinning the public namespace
-		 */
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_namespace "
-		"    WHERE nspname LIKE 'pg%';\n\n",
-
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_ts_parser;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_ts_dict;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_ts_template;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_ts_config;\n\n",
-		"INSERT INTO pg_depend SELECT 0,0,0, tableoid,oid,0, 'p' "
-		" FROM pg_collation;\n\n",
-		"INSERT INTO pg_shdepend SELECT 0,0,0,0, tableoid,oid, 'p' "
-		" FROM pg_authid;\n\n",
+		"SELECT pg_stop_making_pinned_objects();\n\n",
 		NULL
 	};
 
@@ -1702,8 +1635,7 @@ setup_privileges(FILE *cmdfd)
 		CppAsString2(RELKIND_VIEW) ", " CppAsString2(RELKIND_MATVIEW) ", "
 		CppAsString2(RELKIND_SEQUENCE) ")"
 		"  AND relacl IS NULL;\n\n",
-		"GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;\n\n",
-		"GRANT CREATE, USAGE ON SCHEMA public TO PUBLIC;\n\n",
+		"GRANT USAGE ON SCHEMA pg_catalog, public TO PUBLIC;\n\n",
 		"REVOKE ALL ON pg_largeobject FROM PUBLIC;\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
@@ -2263,12 +2195,13 @@ usage(const char *progname)
 	printf(_("      --wal-segsize=SIZE    size of WAL segments, in megabytes\n"));
 	printf(_("\nLess commonly used options:\n"));
 	printf(_("  -d, --debug               generate lots of debugging output\n"));
+	printf(_("      --discard-caches      set debug_discard_caches=1\n"));
 	printf(_("  -L DIRECTORY              where to find the input files\n"));
 	printf(_("  -n, --no-clean            do not clean up after errors\n"));
 	printf(_("  -N, --no-sync             do not wait for changes to be written safely to disk\n"));
 	printf(_("      --no-instructions     do not print instructions for next steps\n"));
 	printf(_("  -s, --show                show internal settings\n"));
-	printf(_("  -S, --sync-only           only sync data directory\n"));
+	printf(_("  -S, --sync-only           only sync database files to disk, then exit\n"));
 	printf(_("\nOther options:\n"));
 	printf(_("  -V, --version             output version information, then exit\n"));
 	printf(_("  -?, --help                show this help, then exit\n"));
@@ -2506,6 +2439,7 @@ setup_data_file_paths(void)
 	set_input(&info_schema_file, "information_schema.sql");
 	set_input(&features_file, "sql_features.txt");
 	set_input(&system_constraints_file, "system_constraints.sql");
+	set_input(&system_functions_file, "system_functions.sql");
 	set_input(&system_views_file, "system_views.sql");
 
 	if (show_setting || debug)
@@ -2532,6 +2466,8 @@ setup_data_file_paths(void)
 	check_input(dictionary_file);
 	check_input(info_schema_file);
 	check_input(features_file);
+	check_input(system_constraints_file);
+	check_input(system_functions_file);
 	check_input(system_views_file);
 }
 
@@ -2859,8 +2795,8 @@ initialize_data_directory(void)
 	fflush(stdout);
 
 	snprintf(cmd, sizeof(cmd),
-			 "\"%s\" %s template1 >%s",
-			 backend_exec, backend_options,
+			 "\"%s\" %s %s template1 >%s",
+			 backend_exec, backend_options, extra_options,
 			 DEVNULL);
 
 	PG_CMD_OPEN;
@@ -2868,6 +2804,8 @@ initialize_data_directory(void)
 	setup_auth(cmdfd);
 
 	setup_run_file(cmdfd, system_constraints_file);
+
+	setup_run_file(cmdfd, system_functions_file);
 
 	setup_depend(cmdfd);
 
@@ -2937,6 +2875,7 @@ main(int argc, char *argv[])
 		{"wal-segsize", required_argument, NULL, 12},
 		{"data-checksums", no_argument, NULL, 'k'},
 		{"allow-group-access", no_argument, NULL, 'g'},
+		{"discard-caches", no_argument, NULL, 14},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -3077,6 +3016,11 @@ main(int argc, char *argv[])
 				break;
 			case 'g':
 				SetDataDirectoryCreatePerm(PG_DIR_MODE_GROUP);
+				break;
+			case 14:
+				extra_options = psprintf("%s %s",
+										 extra_options,
+										 "-c debug_discard_caches=1");
 				break;
 			default:
 				/* getopt_long already emitted a complaint */

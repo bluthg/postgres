@@ -176,6 +176,8 @@ extern PrefetchBufferResult PrefetchSharedBuffer(struct SMgrRelationData *smgr_r
 												 BlockNumber blockNum);
 extern PrefetchBufferResult PrefetchBuffer(Relation reln, ForkNumber forkNum,
 										   BlockNumber blockNum);
+extern bool ReadRecentBuffer(RelFileNode rnode, ForkNumber forkNum,
+							 BlockNumber blockNum, Buffer recent_buffer);
 extern Buffer ReadBuffer(Relation reln, BlockNumber blockNum);
 extern Buffer ReadBufferExtended(Relation reln, ForkNumber forkNum,
 								 BlockNumber blockNum, ReadBufferMode mode,
@@ -192,7 +194,6 @@ extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,
 
 extern void InitBufferPool(void);
 extern void InitBufferPoolAccess(void);
-extern void InitBufferPoolBackend(void);
 extern void AtEOXact_Buffers(bool isCommit);
 extern void PrintBufferLeakWarning(Buffer buffer);
 extern void CheckPointBuffers(int flags);

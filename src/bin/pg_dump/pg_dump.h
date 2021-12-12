@@ -81,11 +81,17 @@ typedef enum
 	DO_POLICY,
 	DO_PUBLICATION,
 	DO_PUBLICATION_REL,
+	DO_PUBLICATION_TABLE_IN_SCHEMA,
 	DO_SUBSCRIPTION
 } DumpableObjectType;
 
-/* component types of an object which can be selected for dumping */
-typedef uint32 DumpComponents;	/* a bitmask of dump object components */
+/*
+ * DumpComponents is a bitmask of the potentially dumpable components of
+ * a database object: its core definition, plus optional attributes such
+ * as ACL, comments, etc.  The NONE and ALL symbols are convenient
+ * shorthands.
+ */
+typedef uint32 DumpComponents;
 #define DUMP_COMPONENT_NONE			(0)
 #define DUMP_COMPONENT_DEFINITION	(1 << 0)
 #define DUMP_COMPONENT_DATA			(1 << 1)
@@ -130,8 +136,9 @@ typedef struct _dumpableObject
 	DumpId		dumpId;			/* assigned by AssignDumpId() */
 	char	   *name;			/* object name (should never be NULL) */
 	struct _namespaceInfo *namespace;	/* containing namespace, or NULL */
-	DumpComponents dump;		/* bitmask of components to dump */
+	DumpComponents dump;		/* bitmask of components requested to dump */
 	DumpComponents dump_contains;	/* as above, but for contained objects */
+	DumpComponents components;	/* bitmask of components available to dump */
 	bool		ext_member;		/* true if object is member of extension */
 	bool		depends_on_ext; /* true if object depends on an extension */
 	DumpId	   *dependencies;	/* dumpIds of objects this one depends on */
@@ -139,14 +146,36 @@ typedef struct _dumpableObject
 	int			allocDeps;		/* allocated size of dependencies[] */
 } DumpableObject;
 
+/*
+ * Object types that have ACLs must store them in a DumpableAcl sub-struct,
+ * which must immediately follow the DumpableObject base struct.
+ *
+ * Note: when dumping from a pre-9.2 server, which lacks the acldefault()
+ * function, acldefault will be NULL or empty.
+ */
+typedef struct _dumpableAcl
+{
+	char	   *acl;			/* the object's actual ACL string */
+	char	   *acldefault;		/* default ACL for the object's type & owner */
+	/* these fields come from the object's pg_init_privs entry, if any: */
+	char		privtype;		/* entry type, 'i' or 'e'; 0 if no entry */
+	char	   *initprivs;		/* the object's initial ACL string, or NULL */
+} DumpableAcl;
+
+/* Generic struct that can be used to access any object type having an ACL */
+typedef struct _dumpableObjectWithAcl
+{
+	DumpableObject dobj;
+	DumpableAcl dacl;
+} DumpableObjectWithAcl;
+
 typedef struct _namespaceInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
+	bool		create;			/* CREATE SCHEMA, or just set owner? */
+	Oid			nspowner;
 	char	   *rolname;		/* name of owner, or empty string */
-	char	   *nspacl;
-	char	   *rnspacl;
-	char	   *initnspacl;
-	char	   *initrnspacl;
 } NamespaceInfo;
 
 typedef struct _extensionInfo
@@ -162,16 +191,15 @@ typedef struct _extensionInfo
 typedef struct _typeInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
 
 	/*
-	 * Note: dobj.name is the pg_type.typname entry.  format_type() might
-	 * produce something different than typname
+	 * Note: dobj.name is the raw pg_type.typname entry.  ftypname is the
+	 * result of format_type(), which will be quoted if needed, and might be
+	 * schema-qualified too.
 	 */
+	char	   *ftypname;
 	char	   *rolname;		/* name of owner, or empty string */
-	char	   *typacl;
-	char	   *rtypacl;
-	char	   *inittypacl;
-	char	   *initrtypacl;
 	Oid			typelem;
 	Oid			typrelid;
 	char		typrelkind;		/* 'r', 'v', 'c', etc */
@@ -196,15 +224,12 @@ typedef struct _shellTypeInfo
 typedef struct _funcInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
 	char	   *rolname;		/* name of owner, or empty string */
 	Oid			lang;
 	int			nargs;
 	Oid		   *argtypes;
 	Oid			prorettype;
-	char	   *proacl;
-	char	   *rproacl;
-	char	   *initproacl;
-	char	   *initrproacl;
 } FuncInfo;
 
 /* AggInfo is a superset of FuncInfo */
@@ -259,11 +284,8 @@ typedef struct _tableInfo
 	 * These fields are collected for every table in the database.
 	 */
 	DumpableObject dobj;
+	DumpableAcl dacl;
 	char	   *rolname;		/* name of owner, or empty string */
-	char	   *relacl;
-	char	   *rrelacl;
-	char	   *initrelacl;
-	char	   *initrrelacl;
 	char		relkind;
 	char		relpersistence; /* relation persistence */
 	bool		relispopulated; /* relation is populated */
@@ -275,6 +297,7 @@ typedef struct _tableInfo
 	bool		hasindex;		/* does it have any indexes? */
 	bool		hasrules;		/* does it have any rules? */
 	bool		hastriggers;	/* does it have any triggers? */
+	bool		hascolumnACLs;	/* do any columns have non-default ACLs? */
 	bool		rowsec;			/* is row security enabled? */
 	bool		forcerowsec;	/* is row security forced? */
 	bool		hasoids;		/* does it have OIDs? */
@@ -284,13 +307,15 @@ typedef struct _tableInfo
 	uint32		toast_frozenxid;	/* toast table's relfrozenxid, if any */
 	uint32		toast_minmxid;	/* toast table's relminmxid */
 	int			ncheck;			/* # of CHECK expressions */
-	char	   *reloftype;		/* underlying type for typed table */
+	Oid			reltype;		/* OID of table's composite type, if any */
+	Oid			reloftype;		/* underlying type for typed table */
 	Oid			foreign_server; /* foreign server oid, if applicable */
 	/* these two are set only if table is a sequence owned by a column: */
 	Oid			owning_tab;		/* OID of table owning sequence */
 	int			owning_col;		/* attr # of column owning sequence */
 	bool		is_identity_sequence;
 	int			relpages;		/* table's size in pages (from pg_class) */
+	int			toastpages;		/* toast table's size in pages, if any */
 
 	bool		interesting;	/* true if need to collect more data */
 	bool		dummy_view;		/* view's real definition must be postponed */
@@ -323,8 +348,6 @@ typedef struct _tableInfo
 	bool	   *inhNotNull;		/* true if NOT NULL is inherited */
 	struct _attrDefInfo **attrdefs; /* DEFAULT expressions */
 	struct _constraintInfo *checkexprs; /* CHECK constraints */
-	char	   *partkeydef;		/* partition key definition */
-	char	   *partbound;		/* partition bound definition */
 	bool		needs_override; /* has GENERATED ALWAYS AS IDENTITY */
 	char	   *amname;			/* relation access method */
 
@@ -376,8 +399,6 @@ typedef struct _indxInfo
 	int			indnattrs;		/* total number of index attributes */
 	Oid		   *indkeys;		/* In spite of the name 'indkeys' this field
 								 * contains both key and nonkey attributes */
-	char	   *inddependcollnames; /* FQ names of depended-on collations */
-	char	   *inddependcollversions;	/* versions of the above */
 	bool		indisclustered;
 	bool		indisreplident;
 	Oid			parentidx;		/* if a partition, parent index OID */
@@ -425,6 +446,7 @@ typedef struct _triggerInfo
 	Oid			tgconstrrelid;
 	char	   *tgconstrrelname;
 	char		tgenabled;
+	bool		tgisinternal;
 	bool		tgdeferrable;
 	bool		tginitdeferred;
 	char	   *tgdef;
@@ -467,14 +489,11 @@ typedef struct _constraintInfo
 typedef struct _procLangInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
 	bool		lanpltrusted;
 	Oid			lanplcallfoid;
 	Oid			laninline;
 	Oid			lanvalidator;
-	char	   *lanacl;
-	char	   *rlanacl;
-	char	   *initlanacl;
-	char	   *initrlanacl;
 	char	   *lanowner;		/* name of owner, or empty string */
 } ProcLangInfo;
 
@@ -539,49 +558,37 @@ typedef struct _cfgInfo
 typedef struct _fdwInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
 	char	   *rolname;
 	char	   *fdwhandler;
 	char	   *fdwvalidator;
 	char	   *fdwoptions;
-	char	   *fdwacl;
-	char	   *rfdwacl;
-	char	   *initfdwacl;
-	char	   *initrfdwacl;
 } FdwInfo;
 
 typedef struct _foreignServerInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
 	char	   *rolname;
 	Oid			srvfdw;
 	char	   *srvtype;
 	char	   *srvversion;
-	char	   *srvacl;
-	char	   *rsrvacl;
-	char	   *initsrvacl;
-	char	   *initrsrvacl;
 	char	   *srvoptions;
 } ForeignServerInfo;
 
 typedef struct _defaultACLInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
 	char	   *defaclrole;
 	char		defaclobjtype;
-	char	   *defaclacl;
-	char	   *rdefaclacl;
-	char	   *initdefaclacl;
-	char	   *initrdefaclacl;
 } DefaultACLInfo;
 
 typedef struct _blobInfo
 {
 	DumpableObject dobj;
+	DumpableAcl dacl;
 	char	   *rolname;
-	char	   *blobacl;
-	char	   *rblobacl;
-	char	   *initblobacl;
-	char	   *initrblobacl;
 } BlobInfo;
 
 /*
@@ -629,6 +636,17 @@ typedef struct _PublicationRelInfo
 } PublicationRelInfo;
 
 /*
+ * The PublicationSchemaInfo struct is used to represent publication schema
+ * mapping.
+ */
+typedef struct _PublicationSchemaInfo
+{
+	DumpableObject dobj;
+	PublicationInfo *publication;
+	NamespaceInfo *pubschema;
+} PublicationSchemaInfo;
+
+/*
  * The SubscriptionInfo struct is used to represent subscription.
  */
 typedef struct _SubscriptionInfo
@@ -639,19 +657,10 @@ typedef struct _SubscriptionInfo
 	char	   *subslotname;
 	char	   *subbinary;
 	char	   *substream;
+	char	   *subtwophasestate;
 	char	   *subsynccommit;
 	char	   *subpublications;
 } SubscriptionInfo;
-
-/*
- * We build an array of these with an entry for each object that is an
- * extension member according to pg_depend.
- */
-typedef struct _extensionMemberId
-{
-	CatalogId	catId;			/* tableoid+oid of some member object */
-	ExtensionInfo *ext;			/* owning extension */
-} ExtensionMemberId;
 
 /*
  *	common utility functions
@@ -678,7 +687,7 @@ extern NamespaceInfo *findNamespaceByOid(Oid oid);
 extern ExtensionInfo *findExtensionByOid(Oid oid);
 extern PublicationInfo *findPublicationByOid(Oid oid);
 
-extern void setExtensionMembership(ExtensionMemberId *extmems, int nextmems);
+extern void recordExtensionMembership(CatalogId catId, ExtensionInfo *ext);
 extern ExtensionInfo *findOwningExtension(CatalogId catalogId);
 
 extern void parseOidArray(const char *str, Oid *array, int arraysize);
@@ -731,6 +740,7 @@ extern EventTriggerInfo *getEventTriggers(Archive *fout, int *numEventTriggers);
 extern void getPolicies(Archive *fout, TableInfo tblinfo[], int numTables);
 extern PublicationInfo *getPublications(Archive *fout,
 										int *numPublications);
+extern void getPublicationNamespaces(Archive *fout);
 extern void getPublicationTables(Archive *fout, TableInfo tblinfo[],
 								 int numTables);
 extern void getSubscriptions(Archive *fout);

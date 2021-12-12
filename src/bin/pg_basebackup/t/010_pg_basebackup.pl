@@ -1,20 +1,24 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 use strict;
 use warnings;
 use Cwd;
 use Config;
 use File::Basename qw(basename dirname);
 use File::Path qw(rmtree);
-use PostgresNode;
-use TestLib;
+use Fcntl qw(:seek);
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 110;
 
 program_help_ok('pg_basebackup');
 program_version_ok('pg_basebackup');
 program_options_handling_ok('pg_basebackup');
 
-my $tempdir = TestLib::tempdir;
+my $tempdir = PostgreSQL::Test::Utils::tempdir;
 
-my $node = get_new_node('main');
+my $node = PostgreSQL::Test::Cluster->new('main');
 
 # Set umask so test directories and files are created with default permissions
 umask(0077);
@@ -234,12 +238,14 @@ $node->start;
 # to our physical temp location.  That way we can use shorter names
 # for the tablespace directories, which hopefully won't run afoul of
 # the 99 character length limit.
-my $shorter_tempdir = TestLib::tempdir_short . "/tempdir";
+my $sys_tempdir = PostgreSQL::Test::Utils::tempdir_short;
+my $real_sys_tempdir = PostgreSQL::Test::Utils::perl2host($sys_tempdir) . "/tempdir";
+my $shorter_tempdir =  $sys_tempdir . "/tempdir";
 dir_symlink "$tempdir", $shorter_tempdir;
 
 mkdir "$tempdir/tblspc1";
-my $realTsDir    = TestLib::perl2host("$shorter_tempdir/tblspc1");
-my $real_tempdir = TestLib::perl2host($tempdir);
+my $realTsDir    = "$real_sys_tempdir/tblspc1";
+my $real_tempdir = PostgreSQL::Test::Utils::perl2host($tempdir);
 $node->safe_psql('postgres',
 	"CREATE TABLESPACE tblspc1 LOCATION '$realTsDir';");
 $node->safe_psql('postgres',
@@ -261,19 +267,22 @@ is(scalar(@tblspc_tars), 1, 'one tablespace tar was created');
 SKIP:
 {
 	my $tar = $ENV{TAR};
+	# don't check for a working tar here, to accomodate various odd
+	# cases such as AIX. If tar doesn't work the init_from_backup below
+	# will fail.
 	skip "no tar program available", 1
 	  if (!defined $tar || $tar eq '');
 
-	my $node2 = get_new_node('replica');
+	my $node2 = PostgreSQL::Test::Cluster->new('replica');
 
 	# Recover main data directory
 	$node2->init_from_backup($node, 'tarbackup2', tar_program => $tar);
 
 	# Recover tablespace into a new directory (not where it was!)
 	my $repTsDir     = "$tempdir/tblspc1replica";
-	my $realRepTsDir = TestLib::perl2host("$shorter_tempdir/tblspc1replica");
+	my $realRepTsDir = "$real_sys_tempdir/tblspc1replica";
 	mkdir $repTsDir;
-	TestLib::system_or_bail($tar, 'xf', $tblspc_tars[0], '-C', $repTsDir);
+	PostgreSQL::Test::Utils::system_or_bail($tar, 'xf', $tblspc_tars[0], '-C', $repTsDir);
 
 	# Update tablespace map to point to new directory.
 	# XXX Ideally pg_basebackup would handle this.
@@ -386,7 +395,7 @@ ok( -d "$tempdir/backup1/pg_replslot",
 rmtree("$tempdir/backup1");
 
 mkdir "$tempdir/tbl=spc2";
-$realTsDir = TestLib::perl2host("$shorter_tempdir/tbl=spc2");
+$realTsDir = "$real_sys_tempdir/tbl=spc2";
 $node->safe_psql('postgres', "DROP TABLE test1;");
 $node->safe_psql('postgres', "DROP TABLE tblspc1_unlogged;");
 $node->safe_psql('postgres', "DROP TABLESPACE tblspc1;");
@@ -405,7 +414,7 @@ $node->safe_psql('postgres', "DROP TABLESPACE tblspc2;");
 rmtree("$tempdir/backup3");
 
 mkdir "$tempdir/$superlongname";
-$realTsDir = TestLib::perl2host("$shorter_tempdir/$superlongname");
+$realTsDir = "$real_sys_tempdir/$superlongname";
 $node->safe_psql('postgres',
 	"CREATE TABLESPACE tblspc3 LOCATION '$realTsDir';");
 $node->command_ok([ 'pg_basebackup', '-D', "$tempdir/tarbackup_l3", '-Ft' ],
@@ -550,12 +559,12 @@ my $file_corrupt2 = $node->safe_psql('postgres',
 
 # set page header and block sizes
 my $pageheader_size = 24;
-my $block_size      = $node->safe_psql('postgres', 'SHOW block_size;');
+my $block_size = $node->safe_psql('postgres', 'SHOW block_size;');
 
 # induce corruption
 system_or_bail 'pg_ctl', '-D', $pgdata, 'stop';
 open $file, '+<', "$pgdata/$file_corrupt1";
-seek($file, $pageheader_size, 0);
+seek($file, $pageheader_size, SEEK_SET);
 syswrite($file, "\0\0\0\0\0\0\0\0\0");
 close $file;
 system_or_bail 'pg_ctl', '-D', $pgdata, 'start';
@@ -574,7 +583,7 @@ open $file, '+<', "$pgdata/$file_corrupt1";
 for my $i (1 .. 5)
 {
 	my $offset = $pageheader_size + $i * $block_size;
-	seek($file, $offset, 0);
+	seek($file, $offset, SEEK_SET);
 	syswrite($file, "\0\0\0\0\0\0\0\0\0");
 }
 close $file;
@@ -591,7 +600,7 @@ rmtree("$tempdir/backup_corrupt2");
 # induce corruption in a second file
 system_or_bail 'pg_ctl', '-D', $pgdata, 'stop';
 open $file, '+<', "$pgdata/$file_corrupt2";
-seek($file, $pageheader_size, 0);
+seek($file, $pageheader_size, SEEK_SET);
 syswrite($file, "\0\0\0\0\0\0\0\0\0");
 close $file;
 system_or_bail 'pg_ctl', '-D', $pgdata, 'start';

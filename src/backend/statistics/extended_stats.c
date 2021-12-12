@@ -91,9 +91,9 @@ typedef struct AnlExprData
 } AnlExprData;
 
 static void compute_expr_stats(Relation onerel, double totalrows,
-							   AnlExprData * exprdata, int nexprs,
+							   AnlExprData *exprdata, int nexprs,
 							   HeapTuple *rows, int numrows);
-static Datum serialize_expr_stats(AnlExprData * exprdata, int nexprs);
+static Datum serialize_expr_stats(AnlExprData *exprdata, int nexprs);
 static Datum expr_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
 static AnlExprData *build_expr_data(List *exprs, int stattarget);
 
@@ -125,13 +125,15 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 	if (!natts)
 		return;
 
+	/* the list of stats has to be allocated outside the memory context */
+	pg_stext = table_open(StatisticExtRelationId, RowExclusiveLock);
+	statslist = fetch_statentries_for_relation(pg_stext, RelationGetRelid(onerel));
+
+	/* memory context for building each statistics object */
 	cxt = AllocSetContextCreate(CurrentMemoryContext,
 								"BuildRelationExtStatistics",
 								ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(cxt);
-
-	pg_stext = table_open(StatisticExtRelationId, RowExclusiveLock);
-	statslist = fetch_statentries_for_relation(pg_stext, RelationGetRelid(onerel));
 
 	/* report this phase */
 	if (statslist != NIL)
@@ -180,7 +182,7 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 			continue;
 		}
 
-		/* compute statistics target for this statistics */
+		/* compute statistics target for this statistics object */
 		stattarget = statext_compute_stattarget(stat->stattarget,
 												bms_num_members(stat->columns),
 												stats);
@@ -193,7 +195,7 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 		if (stattarget == 0)
 			continue;
 
-		/* evaluate expressions (if the statistics has any) */
+		/* evaluate expressions (if the statistics object has any) */
 		data = make_build_data(onerel, stat, numrows, rows, stats, stattarget);
 
 		/* compute statistic of each requested type */
@@ -234,14 +236,16 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
 		pgstat_progress_update_param(PROGRESS_ANALYZE_EXT_STATS_COMPUTED,
 									 ++ext_cnt);
 
-		/* free the build data (allocated as a single chunk) */
-		pfree(data);
+		/* free the data used for building this statistics object */
+		MemoryContextReset(cxt);
 	}
-
-	table_close(pg_stext, RowExclusiveLock);
 
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(cxt);
+
+	list_free(statslist);
+
+	table_close(pg_stext, RowExclusiveLock);
 }
 
 /*
@@ -253,9 +257,9 @@ BuildRelationExtStatistics(Relation onerel, double totalrows,
  * when analyzing only some of the columns, this will skip statistics objects
  * that would require additional columns.
  *
- * See statext_compute_stattarget for details about how we compute statistics
- * target for a statistics objects (from the object target, attribute targets
- * and default statistics target).
+ * See statext_compute_stattarget for details about how we compute the
+ * statistics target for a statistics object (from the object target,
+ * attribute targets and default statistics target).
  */
 int
 ComputeExtStatisticsRows(Relation onerel,
@@ -325,8 +329,8 @@ ComputeExtStatisticsRows(Relation onerel,
  *
  * When computing target for extended statistics objects, we consider three
  * places where the target may be set - the statistics object itself,
- * attributes the statistics is defined on, and then the default statistics
- * target.
+ * attributes the statistics object is defined on, and then the default
+ * statistics target.
  *
  * First we look at what's set for the statistics object itself, using the
  * ALTER STATISTICS ... SET STATISTICS command. If we find a valid value
@@ -358,7 +362,7 @@ statext_compute_stattarget(int stattarget, int nattrs, VacAttrStats **stats)
 	 */
 	for (i = 0; i < nattrs; i++)
 	{
-		/* keep the maximmum statistics target */
+		/* keep the maximum statistics target */
 		if (stats[i]->attr->attstattarget > stattarget)
 			stattarget = stats[i]->attr->attstattarget;
 	}
@@ -539,9 +543,9 @@ examine_attribute(Node *expr)
 
 	/*
 	 * When analyzing an expression, believe the expression tree's type not
-	 * the column datatype --- the latter might be the opckeytype storage
-	 * type of the opclass, which is not interesting for our purposes.  (Note:
-	 * if we did anything with non-expression statistics columns, we'd need to
+	 * the column datatype --- the latter might be the opckeytype storage type
+	 * of the opclass, which is not interesting for our purposes.  (Note: if
+	 * we did anything with non-expression statistics columns, we'd need to
 	 * figure out where to get the correct type info from, but for now that's
 	 * not a problem.)	It's not clear whether anyone will care about the
 	 * typmod, but we store that too just in case.
@@ -695,11 +699,11 @@ examine_expression(Node *expr, int stattarget)
 }
 
 /*
- * Using 'vacatts' of size 'nvacatts' as input data, return a newly built
+ * Using 'vacatts' of size 'nvacatts' as input data, return a newly-built
  * VacAttrStats array which includes only the items corresponding to
- * attributes indicated by 'stxkeys'. If we don't have all of the per column
- * stats available to compute the extended stats, then we return NULL to indicate
- * to the caller that the stats should not be built.
+ * attributes indicated by 'attrs'.  If we don't have all of the per-column
+ * stats available to compute the extended stats, then we return NULL to
+ * indicate to the caller that the stats should not be built.
  */
 static VacAttrStats **
 lookup_var_attr_stats(Relation rel, Bitmapset *attrs, List *exprs,
@@ -1255,6 +1259,10 @@ choose_best_statistics(List *stats, char requiredkind,
 		/*
 		 * Collect attributes and expressions in remaining (unestimated)
 		 * clauses fully covered by this statistic object.
+		 *
+		 * We know already estimated clauses have both clause_attnums and
+		 * clause_exprs set to NULL. We leave the pointers NULL if already
+		 * estimated, or we reset them to NULL after estimating the clause.
 		 */
 		for (i = 0; i < nclauses; i++)
 		{
@@ -1605,7 +1613,7 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 
 	if (pg_class_aclcheck(rte->relid, userid, ACL_SELECT) != ACLCHECK_OK)
 	{
-		Bitmapset  *clause_attnums;
+		Bitmapset  *clause_attnums = NULL;
 
 		/* Don't have table privilege, must check individual columns */
 		if (*exprs != NIL)
@@ -1758,39 +1766,65 @@ statext_mcv_clauselist_selectivity(PlannerInfo *root, List *clauses, int varReli
 		/* record which clauses are simple (single column or expression) */
 		simple_clauses = NULL;
 
-		listidx = 0;
+		listidx = -1;
 		foreach(l, clauses)
 		{
-			/*
-			 * If the clause is not already estimated and is compatible with
-			 * the selected statistics object (all attributes and expressions
-			 * covered), mark it as estimated and add it to the list to
-			 * estimate.
-			 */
-			if (!bms_is_member(listidx, *estimatedclauses) &&
-				bms_is_subset(list_attnums[listidx], stat->keys) &&
-				stat_covers_expressions(stat, list_exprs[listidx], NULL))
-			{
-				/* record simple clauses (single column or expression) */
-				if ((list_attnums[listidx] == NULL &&
-					 list_length(list_exprs[listidx]) == 1) ||
-					(list_exprs[listidx] == NIL &&
-					 bms_membership(list_attnums[listidx]) == BMS_SINGLETON))
-					simple_clauses = bms_add_member(simple_clauses,
-													list_length(stat_clauses));
-
-				/* add clause to list and mark as estimated */
-				stat_clauses = lappend(stat_clauses, (Node *) lfirst(l));
-				*estimatedclauses = bms_add_member(*estimatedclauses, listidx);
-
-				bms_free(list_attnums[listidx]);
-				list_attnums[listidx] = NULL;
-
-				list_free(list_exprs[listidx]);
-				list_exprs[listidx] = NULL;
-			}
-
+			/* Increment the index before we decide if to skip the clause. */
 			listidx++;
+
+			/*
+			 * Ignore clauses from which we did not extract any attnums or
+			 * expressions (this needs to be consistent with what we do in
+			 * choose_best_statistics).
+			 *
+			 * This also eliminates already estimated clauses - both those
+			 * estimated before and during applying extended statistics.
+			 *
+			 * XXX This check is needed because both bms_is_subset and
+			 * stat_covers_expressions return true for empty attnums and
+			 * expressions.
+			 */
+			if (!list_attnums[listidx] && !list_exprs[listidx])
+				continue;
+
+			/*
+			 * The clause was not estimated yet, and we've extracted either
+			 * attnums or expressions from it. Ignore it if it's not fully
+			 * covered by the chosen statistics object.
+			 *
+			 * We need to check both attributes and expressions, and reject if
+			 * either is not covered.
+			 */
+			if (!bms_is_subset(list_attnums[listidx], stat->keys) ||
+				!stat_covers_expressions(stat, list_exprs[listidx], NULL))
+				continue;
+
+			/*
+			 * Now we know the clause is compatible (we have either attnums or
+			 * expressions extracted from it), and was not estimated yet.
+			 */
+
+			/* record simple clauses (single column or expression) */
+			if ((list_attnums[listidx] == NULL &&
+				 list_length(list_exprs[listidx]) == 1) ||
+				(list_exprs[listidx] == NIL &&
+				 bms_membership(list_attnums[listidx]) == BMS_SINGLETON))
+				simple_clauses = bms_add_member(simple_clauses,
+												list_length(stat_clauses));
+
+			/* add clause to list and mark it as estimated */
+			stat_clauses = lappend(stat_clauses, (Node *) lfirst(l));
+			*estimatedclauses = bms_add_member(*estimatedclauses, listidx);
+
+			/*
+			 * Reset the pointers, so that choose_best_statistics knows this
+			 * clause was estimated and does not consider it again.
+			 */
+			bms_free(list_attnums[listidx]);
+			list_attnums[listidx] = NULL;
+
+			list_free(list_exprs[listidx]);
+			list_exprs[listidx] = NULL;
 		}
 
 		if (is_or)
@@ -2244,7 +2278,8 @@ serialize_expr_stats(AnlExprData *exprdata, int nexprs)
 	if (!OidIsValid(typOid))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("relation \"pg_statistic\" does not have a composite type")));
+				 errmsg("relation \"%s\" does not have a composite type",
+						"pg_statistic")));
 
 	for (exprno = 0; exprno < nexprs; exprno++)
 	{
@@ -2390,6 +2425,8 @@ statext_expressions_load(Oid stxoid, int idx)
 
 	/* Build a temporary HeapTuple control structure */
 	tmptup.t_len = HeapTupleHeaderGetDatumLength(td);
+	ItemPointerSetInvalid(&(tmptup.t_self));
+	tmptup.t_tableOid = InvalidOid;
 	tmptup.t_data = td;
 
 	tup = heap_copytuple(&tmptup);

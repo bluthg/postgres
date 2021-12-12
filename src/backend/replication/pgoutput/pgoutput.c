@@ -51,6 +51,16 @@ static void pgoutput_message(LogicalDecodingContext *ctx,
 							 Size sz, const char *message);
 static bool pgoutput_origin_filter(LogicalDecodingContext *ctx,
 								   RepOriginId origin_id);
+static void pgoutput_begin_prepare_txn(LogicalDecodingContext *ctx,
+									   ReorderBufferTXN *txn);
+static void pgoutput_prepare_txn(LogicalDecodingContext *ctx,
+								 ReorderBufferTXN *txn, XLogRecPtr prepare_lsn);
+static void pgoutput_commit_prepared_txn(LogicalDecodingContext *ctx,
+										 ReorderBufferTXN *txn, XLogRecPtr commit_lsn);
+static void pgoutput_rollback_prepared_txn(LogicalDecodingContext *ctx,
+										   ReorderBufferTXN *txn,
+										   XLogRecPtr prepare_end_lsn,
+										   TimestampTz prepare_time);
 static void pgoutput_stream_start(struct LogicalDecodingContext *ctx,
 								  ReorderBufferTXN *txn);
 static void pgoutput_stream_stop(struct LogicalDecodingContext *ctx,
@@ -61,6 +71,8 @@ static void pgoutput_stream_abort(struct LogicalDecodingContext *ctx,
 static void pgoutput_stream_commit(struct LogicalDecodingContext *ctx,
 								   ReorderBufferTXN *txn,
 								   XLogRecPtr commit_lsn);
+static void pgoutput_stream_prepare_txn(LogicalDecodingContext *ctx,
+										ReorderBufferTXN *txn, XLogRecPtr prepare_lsn);
 
 static bool publications_valid;
 static bool in_streaming;
@@ -70,11 +82,15 @@ static void publication_invalidation_cb(Datum arg, int cacheid,
 										uint32 hashvalue);
 static void send_relation_and_attrs(Relation relation, TransactionId xid,
 									LogicalDecodingContext *ctx);
+static void send_repl_origin(LogicalDecodingContext *ctx,
+							 RepOriginId origin_id, XLogRecPtr origin_lsn,
+							 bool send_origin);
 
 /*
  * Entry in the map used to remember which relation schemas we sent.
  *
- * The schema_sent flag determines if the current schema record was already
+ * The schema_sent flag determines if the current schema record for the
+ * relation (and for its ancestor if publish_as_relid is set) was already
  * sent to the subscriber (in which case we don't need to send it again).
  *
  * The schema cache on downstream is however updated only at commit time,
@@ -92,10 +108,6 @@ typedef struct RelationSyncEntry
 {
 	Oid			relid;			/* relation oid */
 
-	/*
-	 * Did we send the schema?  If ancestor relid is set, its schema must also
-	 * have been sent for this to be true.
-	 */
 	bool		schema_sent;
 	List	   *streamed_txns;	/* streamed toplevel transactions with this
 								 * schema */
@@ -148,6 +160,11 @@ _PG_output_plugin_init(OutputPluginCallbacks *cb)
 	cb->truncate_cb = pgoutput_truncate;
 	cb->message_cb = pgoutput_message;
 	cb->commit_cb = pgoutput_commit_txn;
+
+	cb->begin_prepare_cb = pgoutput_begin_prepare_txn;
+	cb->prepare_cb = pgoutput_prepare_txn;
+	cb->commit_prepared_cb = pgoutput_commit_prepared_txn;
+	cb->rollback_prepared_cb = pgoutput_rollback_prepared_txn;
 	cb->filter_by_origin_cb = pgoutput_origin_filter;
 	cb->shutdown_cb = pgoutput_shutdown;
 
@@ -159,6 +176,8 @@ _PG_output_plugin_init(OutputPluginCallbacks *cb)
 	cb->stream_change_cb = pgoutput_change;
 	cb->stream_message_cb = pgoutput_message;
 	cb->stream_truncate_cb = pgoutput_truncate;
+	/* transaction streaming - two-phase commit */
+	cb->stream_prepare_cb = pgoutput_stream_prepare_txn;
 }
 
 static void
@@ -170,10 +189,12 @@ parse_output_parameters(List *options, PGOutputData *data)
 	bool		binary_option_given = false;
 	bool		messages_option_given = false;
 	bool		streaming_given = false;
+	bool		two_phase_option_given = false;
 
 	data->binary = false;
 	data->streaming = false;
 	data->messages = false;
+	data->two_phase = false;
 
 	foreach(lc, options)
 	{
@@ -249,6 +270,16 @@ parse_output_parameters(List *options, PGOutputData *data)
 
 			data->streaming = defGetBoolean(defel);
 		}
+		else if (strcmp(defel->defname, "two_phase") == 0)
+		{
+			if (two_phase_option_given)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options")));
+			two_phase_option_given = true;
+
+			data->two_phase = defGetBoolean(defel);
+		}
 		else
 			elog(ERROR, "unrecognized pgoutput option: %s", defel->defname);
 	}
@@ -322,6 +353,27 @@ pgoutput_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 		/* Also remember we're currently not streaming any transaction. */
 		in_streaming = false;
 
+		/*
+		 * Here, we just check whether the two-phase option is passed by
+		 * plugin and decide whether to enable it at later point of time. It
+		 * remains enabled if the previous start-up has done so. But we only
+		 * allow the option to be passed in with sufficient version of the
+		 * protocol, and when the output plugin supports it.
+		 */
+		if (!data->two_phase)
+			ctx->twophase_opt_given = false;
+		else if (data->protocol_version < LOGICALREP_PROTO_TWOPHASE_VERSION_NUM)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("requested proto_version=%d does not support two-phase commit, need %d or higher",
+							data->protocol_version, LOGICALREP_PROTO_TWOPHASE_VERSION_NUM)));
+		else if (!ctx->twophase)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("two-phase commit requested, but not supported by output plugin")));
+		else
+			ctx->twophase_opt_given = true;
+
 		/* Init publication state. */
 		data->publications = NIL;
 		publications_valid = false;
@@ -334,8 +386,12 @@ pgoutput_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 	}
 	else
 	{
-		/* Disable the streaming during the slot initialization mode. */
+		/*
+		 * Disable the streaming and prepared transactions during the slot
+		 * initialization mode.
+		 */
 		ctx->streaming = false;
+		ctx->twophase = false;
 	}
 }
 
@@ -350,29 +406,8 @@ pgoutput_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn)
 	OutputPluginPrepareWrite(ctx, !send_replication_origin);
 	logicalrep_write_begin(ctx->out, txn);
 
-	if (send_replication_origin)
-	{
-		char	   *origin;
-
-		/*----------
-		 * XXX: which behaviour do we want here?
-		 *
-		 * Alternatives:
-		 *	- don't send origin message if origin name not found
-		 *	  (that's what we do now)
-		 *	- throw error - that will break replication, not good
-		 *	- send some special "unknown" origin
-		 *----------
-		 */
-		if (replorigin_by_oid(txn->origin_id, true, &origin))
-		{
-			/* Message boundary */
-			OutputPluginWrite(ctx, false);
-			OutputPluginPrepareWrite(ctx, true);
-			logicalrep_write_origin(ctx->out, origin, txn->origin_lsn);
-		}
-
-	}
+	send_repl_origin(ctx, txn->origin_id, txn->origin_lsn,
+					 send_replication_origin);
 
 	OutputPluginWrite(ctx, true);
 }
@@ -392,12 +427,74 @@ pgoutput_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 }
 
 /*
+ * BEGIN PREPARE callback
+ */
+static void
+pgoutput_begin_prepare_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn)
+{
+	bool		send_replication_origin = txn->origin_id != InvalidRepOriginId;
+
+	OutputPluginPrepareWrite(ctx, !send_replication_origin);
+	logicalrep_write_begin_prepare(ctx->out, txn);
+
+	send_repl_origin(ctx, txn->origin_id, txn->origin_lsn,
+					 send_replication_origin);
+
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * PREPARE callback
+ */
+static void
+pgoutput_prepare_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
+					 XLogRecPtr prepare_lsn)
+{
+	OutputPluginUpdateProgress(ctx);
+
+	OutputPluginPrepareWrite(ctx, true);
+	logicalrep_write_prepare(ctx->out, txn, prepare_lsn);
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * COMMIT PREPARED callback
+ */
+static void
+pgoutput_commit_prepared_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
+							 XLogRecPtr commit_lsn)
+{
+	OutputPluginUpdateProgress(ctx);
+
+	OutputPluginPrepareWrite(ctx, true);
+	logicalrep_write_commit_prepared(ctx->out, txn, commit_lsn);
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * ROLLBACK PREPARED callback
+ */
+static void
+pgoutput_rollback_prepared_txn(LogicalDecodingContext *ctx,
+							   ReorderBufferTXN *txn,
+							   XLogRecPtr prepare_end_lsn,
+							   TimestampTz prepare_time)
+{
+	OutputPluginUpdateProgress(ctx);
+
+	OutputPluginPrepareWrite(ctx, true);
+	logicalrep_write_rollback_prepared(ctx->out, txn, prepare_end_lsn,
+									   prepare_time);
+	OutputPluginWrite(ctx, true);
+}
+
+/*
  * Write the current schema of the relation and its ancestor (if any) if not
  * done yet.
  */
 static void
 maybe_send_schema(LogicalDecodingContext *ctx,
-				  ReorderBufferTXN *txn, ReorderBufferChange *change,
+				  ReorderBufferChange *change,
 				  Relation relation, RelationSyncEntry *relentry)
 {
 	bool		schema_sent;
@@ -437,10 +534,17 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 	else
 		schema_sent = relentry->schema_sent;
 
+	/* Nothing to do if we already sent the schema. */
 	if (schema_sent)
 		return;
 
-	/* If needed, send the ancestor's schema first. */
+	/*
+	 * Nope, so send the schema.  If the changes will be published using an
+	 * ancestor's schema, not the relation's own, send that ancestor's schema
+	 * before sending relation's own (XXX - maybe sending only the former
+	 * suffices?).  This is also a good place to set the map that will be used
+	 * to convert the relation's tuples into the ancestor's format, if needed.
+	 */
 	if (relentry->publish_as_relid != RelationGetRelid(relation))
 	{
 		Relation	ancestor = RelationIdGetRelation(relentry->publish_as_relid);
@@ -450,8 +554,21 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 
 		/* Map must live as long as the session does. */
 		oldctx = MemoryContextSwitchTo(CacheMemoryContext);
-		relentry->map = convert_tuples_by_name(CreateTupleDescCopy(indesc),
-											   CreateTupleDescCopy(outdesc));
+
+		/*
+		 * Make copies of the TupleDescs that will live as long as the map
+		 * does before putting into the map.
+		 */
+		indesc = CreateTupleDescCopy(indesc);
+		outdesc = CreateTupleDescCopy(outdesc);
+		relentry->map = convert_tuples_by_name(indesc, outdesc);
+		if (relentry->map == NULL)
+		{
+			/* Map not necessary, so free the TupleDescs too. */
+			FreeTupleDesc(indesc);
+			FreeTupleDesc(outdesc);
+		}
+
 		MemoryContextSwitchTo(oldctx);
 		send_relation_and_attrs(ancestor, xid, ctx);
 		RelationClose(ancestor);
@@ -554,7 +671,7 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	/* Avoid leaking memory by using and resetting our own context */
 	old = MemoryContextSwitchTo(data->context);
 
-	maybe_send_schema(ctx, txn, change, relation, relentry);
+	maybe_send_schema(ctx, change, relation, relentry);
 
 	/* Send the data */
 	switch (change->action)
@@ -595,8 +712,11 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 					/* Convert tuples if needed. */
 					if (relentry->map)
 					{
-						oldtuple = execute_attr_map_tuple(oldtuple, relentry->map);
-						newtuple = execute_attr_map_tuple(newtuple, relentry->map);
+						if (oldtuple)
+							oldtuple = execute_attr_map_tuple(oldtuple,
+															  relentry->map);
+						newtuple = execute_attr_map_tuple(newtuple,
+														  relentry->map);
 					}
 				}
 
@@ -688,7 +808,7 @@ pgoutput_truncate(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			continue;
 
 		relids[nrelids++] = relid;
-		maybe_send_schema(ctx, txn, change, relation, relentry);
+		maybe_send_schema(ctx, change, relation, relentry);
 	}
 
 	if (nrelids > 0)
@@ -819,18 +939,8 @@ pgoutput_stream_start(struct LogicalDecodingContext *ctx,
 	OutputPluginPrepareWrite(ctx, !send_replication_origin);
 	logicalrep_write_stream_start(ctx->out, txn->xid, !rbtxn_is_streamed(txn));
 
-	if (send_replication_origin)
-	{
-		char	   *origin;
-
-		if (replorigin_by_oid(txn->origin_id, true, &origin))
-		{
-			/* Message boundary */
-			OutputPluginWrite(ctx, false);
-			OutputPluginPrepareWrite(ctx, true);
-			logicalrep_write_origin(ctx->out, origin, InvalidXLogRecPtr);
-		}
-	}
+	send_repl_origin(ctx, txn->origin_id, InvalidXLogRecPtr,
+					 send_replication_origin);
 
 	OutputPluginWrite(ctx, true);
 
@@ -911,6 +1021,24 @@ pgoutput_stream_commit(struct LogicalDecodingContext *ctx,
 }
 
 /*
+ * PREPARE callback (for streaming two-phase commit).
+ *
+ * Notify the downstream to prepare the transaction.
+ */
+static void
+pgoutput_stream_prepare_txn(LogicalDecodingContext *ctx,
+							ReorderBufferTXN *txn,
+							XLogRecPtr prepare_lsn)
+{
+	Assert(rbtxn_is_streamed(txn));
+
+	OutputPluginUpdateProgress(ctx);
+	OutputPluginPrepareWrite(ctx, true);
+	logicalrep_write_stream_prepare(ctx->out, txn, prepare_lsn);
+	OutputPluginWrite(ctx, true);
+}
+
+/*
  * Initialize the relation schema sync cache for a decoding session.
  *
  * The hash table is destroyed at the end of a decoding session. While
@@ -938,6 +1066,9 @@ init_rel_sync_cache(MemoryContext cachectx)
 
 	CacheRegisterRelcacheCallback(rel_sync_cache_relation_cb, (Datum) 0);
 	CacheRegisterSyscacheCallback(PUBLICATIONRELMAP,
+								  rel_sync_cache_publication_cb,
+								  (Datum) 0);
+	CacheRegisterSyscacheCallback(PUBLICATIONNAMESPACEMAP,
 								  rel_sync_cache_publication_cb,
 								  (Datum) 0);
 }
@@ -1011,12 +1142,22 @@ get_rel_sync_entry(PGOutputData *data, Oid relid)
 		entry->pubactions.pubinsert = entry->pubactions.pubupdate =
 			entry->pubactions.pubdelete = entry->pubactions.pubtruncate = false;
 		entry->publish_as_relid = InvalidOid;
+		entry->map = NULL;		/* will be set by maybe_send_schema() if
+								 * needed */
 	}
 
 	/* Validate the entry */
 	if (!entry->replicate_valid)
 	{
+		Oid			schemaId = get_rel_namespace(relid);
 		List	   *pubids = GetRelationPublications(relid);
+
+		/*
+		 * We don't acquire a lock on the namespace system table as we build
+		 * the cache entry using a historic snapshot and all the later changes
+		 * are absorbed while decoding WAL.
+		 */
+		List	   *schemaPubids = GetSchemaPublications(schemaId);
 		ListCell   *lc;
 		Oid			publish_as_relid = relid;
 
@@ -1073,6 +1214,8 @@ get_rel_sync_entry(PGOutputData *data, Oid relid)
 						Oid			ancestor = lfirst_oid(lc2);
 
 						if (list_member_oid(GetRelationPublications(ancestor),
+											pub->oid) ||
+							list_member_oid(GetSchemaPublications(get_rel_namespace(ancestor)),
 											pub->oid))
 						{
 							ancestor_published = true;
@@ -1082,7 +1225,9 @@ get_rel_sync_entry(PGOutputData *data, Oid relid)
 					}
 				}
 
-				if (list_member_oid(pubids, pub->oid) || ancestor_published)
+				if (list_member_oid(pubids, pub->oid) ||
+					list_member_oid(schemaPubids, pub->oid) ||
+					ancestor_published)
 					publish = true;
 			}
 
@@ -1191,17 +1336,29 @@ rel_sync_cache_relation_cb(Datum arg, Oid relid)
 
 	/*
 	 * Reset schema sent status as the relation definition may have changed.
+	 * Also free any objects that depended on the earlier definition.
 	 */
 	if (entry != NULL)
 	{
 		entry->schema_sent = false;
 		list_free(entry->streamed_txns);
 		entry->streamed_txns = NIL;
+		if (entry->map)
+		{
+			/*
+			 * Must free the TupleDescs contained in the map explicitly,
+			 * because free_conversion_map() doesn't.
+			 */
+			FreeTupleDesc(entry->map->indesc);
+			FreeTupleDesc(entry->map->outdesc);
+			free_conversion_map(entry->map);
+		}
+		entry->map = NULL;
 	}
 }
 
 /*
- * Publication relation map syscache invalidation callback
+ * Publication relation/schema map syscache invalidation callback
  */
 static void
 rel_sync_cache_publication_cb(Datum arg, int cacheid, uint32 hashvalue)
@@ -1234,5 +1391,35 @@ rel_sync_cache_publication_cb(Datum arg, int cacheid, uint32 hashvalue)
 		entry->pubactions.pubupdate = false;
 		entry->pubactions.pubdelete = false;
 		entry->pubactions.pubtruncate = false;
+	}
+}
+
+/* Send Replication origin */
+static void
+send_repl_origin(LogicalDecodingContext *ctx, RepOriginId origin_id,
+				 XLogRecPtr origin_lsn, bool send_origin)
+{
+	if (send_origin)
+	{
+		char	   *origin;
+
+		/*----------
+		 * XXX: which behaviour do we want here?
+		 *
+		 * Alternatives:
+		 *  - don't send origin message if origin name not found
+		 *    (that's what we do now)
+		 *  - throw error - that will break replication, not good
+		 *  - send some special "unknown" origin
+		 *----------
+		 */
+		if (replorigin_by_oid(origin_id, true, &origin))
+		{
+			/* Message boundary */
+			OutputPluginWrite(ctx, false);
+			OutputPluginPrepareWrite(ctx, true);
+
+			logicalrep_write_origin(ctx->out, origin, origin_lsn);
+		}
 	}
 }

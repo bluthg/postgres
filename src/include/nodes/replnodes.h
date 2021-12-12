@@ -56,7 +56,6 @@ typedef struct CreateReplicationSlotCmd
 	ReplicationKind kind;
 	char	   *plugin;
 	bool		temporary;
-	bool		two_phase;
 	List	   *options;
 } CreateReplicationSlotCmd;
 
@@ -86,6 +85,17 @@ typedef struct StartReplicationCmd
 	XLogRecPtr	startpoint;
 	List	   *options;
 } StartReplicationCmd;
+
+
+/* ----------------------
+ *		READ_REPLICATION_SLOT command
+ * ----------------------
+ */
+typedef struct ReadReplicationSlotCmd
+{
+	NodeTag		type;
+	char	   *slotname;
+} ReadReplicationSlotCmd;
 
 
 /* ----------------------

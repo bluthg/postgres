@@ -63,10 +63,8 @@ CATALOG(pg_publication,6104,PublicationRelationId)
  */
 typedef FormData_pg_publication *Form_pg_publication;
 
-DECLARE_UNIQUE_INDEX_PKEY(pg_publication_oid_index, 6110, on pg_publication using btree(oid oid_ops));
-#define PublicationObjectIndexId 6110
-DECLARE_UNIQUE_INDEX(pg_publication_pubname_index, 6111, on pg_publication using btree(pubname name_ops));
-#define PublicationNameIndexId 6111
+DECLARE_UNIQUE_INDEX_PKEY(pg_publication_oid_index, 6110, PublicationObjectIndexId, on pg_publication using btree(oid oid_ops));
+DECLARE_UNIQUE_INDEX(pg_publication_pubname_index, 6111, PublicationNameIndexId, on pg_publication using btree(pubname name_ops));
 
 typedef struct PublicationActions
 {
@@ -84,6 +82,11 @@ typedef struct Publication
 	bool		pubviaroot;
 	PublicationActions pubactions;
 } Publication;
+
+typedef struct PublicationRelInfo
+{
+	Relation	relation;
+} PublicationRelInfo;
 
 extern Publication *GetPublication(Oid pubid);
 extern Publication *GetPublicationByName(const char *pubname, bool missing_ok);
@@ -108,10 +111,22 @@ typedef enum PublicationPartOpt
 extern List *GetPublicationRelations(Oid pubid, PublicationPartOpt pub_partopt);
 extern List *GetAllTablesPublications(void);
 extern List *GetAllTablesPublicationRelations(bool pubviaroot);
+extern List *GetPublicationSchemas(Oid pubid);
+extern List *GetSchemaPublications(Oid schemaid);
+extern List *GetSchemaPublicationRelations(Oid schemaid,
+										   PublicationPartOpt pub_partopt);
+extern List *GetAllSchemaPublicationRelations(Oid puboid,
+											  PublicationPartOpt pub_partopt);
+extern List *GetPubPartitionOptionRelations(List *result,
+											PublicationPartOpt pub_partopt,
+											Oid relid);
 
 extern bool is_publishable_relation(Relation rel);
-extern ObjectAddress publication_add_relation(Oid pubid, Relation targetrel,
+extern bool is_schema_publication(Oid pubid);
+extern ObjectAddress publication_add_relation(Oid pubid, PublicationRelInfo *targetrel,
 											  bool if_not_exists);
+extern ObjectAddress publication_add_schema(Oid pubid, Oid schemaid,
+											bool if_not_exists);
 
 extern Oid	get_publication_oid(const char *pubname, bool missing_ok);
 extern char *get_publication_name(Oid pubid, bool missing_ok);

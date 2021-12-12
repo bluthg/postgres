@@ -346,7 +346,8 @@ initdb --locale=sv_SE
     collation.  (The built-in collatable data types are
     <type>text</type>, <type>varchar</type>, and <type>char</type>.
     User-defined base types can also be marked collatable, and of course
-    a domain over a collatable data type is collatable.)  If the
+    a <glossterm linkend="glossary-domain">domain</glossterm> over a
+    collatable data type is collatable.)  If the
     expression is a column reference, the collation of the expression is the
     defined collation of the column.  If the expression is a constant, the
     collation is the default collation of the data type of the
@@ -746,8 +747,8 @@ CREATE COLLATION german (provider = libc, locale = 'de_DE');
     set that is preloaded by <command>initdb</command>.  Users are encouraged
     to define their own collation objects that make use of these facilities to
     suit the sorting behavior to their requirements.
-    See <ulink url="http://userguide.icu-project.org/locale"></ulink>
-    and <ulink url="http://userguide.icu-project.org/collation/api"></ulink> for
+    See <ulink url="https://unicode-org.github.io/icu/userguide/locale/"></ulink>
+    and <ulink url="https://unicode-org.github.io/icu/userguide/collation/api.html"></ulink> for
     information on ICU locale naming.  The set of acceptable names and
     attributes depends on the particular ICU version.
    </para>
@@ -841,10 +842,6 @@ CREATE COLLATION german (provider = libc, locale = 'de_DE');
     subtag) can be found in
     the <ulink url="https://github.com/unicode-org/cldr/blob/master/common/bcp47/collation.xml">CLDR
     repository</ulink>.
-    The <ulink url="https://ssl.icu-project.org/icu-bin/locexp">ICU Locale
-    Explorer</ulink> can be used to check the details of a particular locale
-    definition.  The examples using the <literal>k*</literal> subtags require
-    at least ICU version 54.
    </para>
 
    <para>
@@ -947,45 +944,6 @@ CREATE COLLATION ignore_accents (provider = icu, locale = 'und-u-ks-level1-kc-tr
      </para>
     </tip>
    </sect3>
-  </sect2>
-
-  <sect2 id="collation-versions">
-   <title>Collation Versions</title>
-
-   <para>
-    The sort order defined by a collation is not necessarily fixed over time.
-    <productname>PostgreSQL</productname> relies on external libraries that
-    are subject to operating system upgrades, and can also differ between
-    servers involved in binary replication and file-system-level migration.
-    Persistent data structures such as B-trees that depend on sort order might
-    be corrupted by any resulting change.
-    <productname>PostgreSQL</productname> defends against this by recording the
-    current version of each referenced collation for any index that depends on
-    it in the
-    <link linkend="catalog-pg-depend"><structname>pg_depend</structname></link>
-    catalog, if the collation provider makes that information available.  If the
-    provider later begins to report a different version, a warning will be
-    issued when the index is accessed, until either the
-    <xref linkend="sql-reindex"/> command or the
-    <xref linkend="sql-alterindex"/> command is used to update the version.
-   </para>
-   <para>
-    Version information is available from the
-    <literal>icu</literal> provider on all operating systems.  For the
-    <literal>libc</literal> provider, versions are currently only available
-    on systems using the GNU C library (most Linux systems), FreeBSD and
-    Windows.
-   </para>
-
-   <note>
-    <para>
-     When using the GNU C library for collations, the C library's version
-     is used as a proxy for the collation version.  Many Linux distributions
-     change collation definitions only when upgrading the C library, but this
-     approach is imperfect as maintainers are free to back-port newer
-     collation definitions to older C library releases.
-    </para>
-   </note>
   </sect2>
  </sect1>
 

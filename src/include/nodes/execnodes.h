@@ -41,6 +41,7 @@ struct ExprContext;
 struct RangeTblEntry;			/* avoid including parsenodes.h here */
 struct ExprEvalStep;			/* avoid including execExpr.h everywhere */
 struct CopyMultiInsertBuffer;
+struct LogicalTapeSet;
 
 
 /* ----------------
@@ -60,7 +61,7 @@ typedef Datum (*ExprStateEvalFunc) (struct ExprState *expression,
 
 typedef struct ExprState
 {
-	NodeTag		tag;
+	NodeTag		type;
 
 	uint8		flags;			/* bitmask of EEO_FLAG_* bits, see above */
 
@@ -431,6 +432,8 @@ typedef struct ResultRelInfo
 	TupleTableSlot *ri_newTupleSlot;
 	/* Slot to hold the old tuple being updated */
 	TupleTableSlot *ri_oldTupleSlot;
+	/* Have the projection and the slots above been initialized? */
+	bool		ri_projectNewInfoValid;
 
 	/* triggers to be fired, if any */
 	TriggerDesc *ri_TrigDesc;
@@ -459,9 +462,10 @@ typedef struct ResultRelInfo
 	bool		ri_usesFdwDirectModify;
 
 	/* batch insert stuff */
-	int			ri_NumSlots;		/* number of slots in the array */
-	int			ri_BatchSize;		/* max slots inserted in a single batch */
-	TupleTableSlot **ri_Slots;		/* input tuples for batch insert */
+	int			ri_NumSlots;	/* number of slots in the array */
+	int			ri_NumSlotsInitialized; /* number of initialized slots */
+	int			ri_BatchSize;	/* max slots inserted in a single batch */
+	TupleTableSlot **ri_Slots;	/* input tuples for batch insert */
 	TupleTableSlot **ri_PlanSlots;
 
 	/* list of WithCheckOption's to be checked */
@@ -512,10 +516,12 @@ typedef struct ResultRelInfo
 
 	/*
 	 * Map to convert child result relation tuples to the format of the table
-	 * actually mentioned in the query (called "root").  Set only if
-	 * transition tuple capture or update partition row movement is active.
+	 * actually mentioned in the query (called "root").  Computed only if
+	 * needed.  A NULL map value indicates that no conversion is needed, so we
+	 * must have a separate flag to show if the map has been computed.
 	 */
 	TupleConversionMap *ri_ChildToRootMap;
+	bool		ri_ChildToRootMapValid;
 
 	/* for use by copyfrom.c when performing multi-inserts */
 	struct CopyMultiInsertBuffer *ri_CopyMultiInsertBuffer;
@@ -534,7 +540,8 @@ typedef struct AsyncRequest
 	int			request_index;	/* Scratch space for requestor */
 	bool		callback_pending;	/* Callback is needed */
 	bool		request_complete;	/* Request complete, result valid */
-	TupleTableSlot *result;		/* Result (NULL if no more tuples) */
+	TupleTableSlot *result;		/* Result (NULL or an empty slot if no more
+								 * tuples) */
 } AsyncRequest;
 
 /* ----------------
@@ -999,6 +1006,8 @@ typedef struct PlanState
 	ExprContext *ps_ExprContext;	/* node's expression-evaluation context */
 	ProjectionInfo *ps_ProjInfo;	/* info for doing tuple projection */
 
+	bool		async_capable;	/* true if node is async-capable */
+
 	/*
 	 * Scanslot's descriptor if known. This is a bit of a hack, but otherwise
 	 * it's hard for expression compilation to optimize based on the
@@ -1248,16 +1257,16 @@ struct AppendState
 	int			as_whichplan;
 	bool		as_begun;		/* false means need to initialize */
 	Bitmapset  *as_asyncplans;	/* asynchronous plans indexes */
-	int			as_nasyncplans;	/* # of asynchronous plans */
+	int			as_nasyncplans; /* # of asynchronous plans */
 	AsyncRequest **as_asyncrequests;	/* array of AsyncRequests */
 	TupleTableSlot **as_asyncresults;	/* unreturned results of async plans */
 	int			as_nasyncresults;	/* # of valid entries in as_asyncresults */
 	bool		as_syncdone;	/* true if all synchronous plans done in
 								 * asynchronous mode, else false */
 	int			as_nasyncremain;	/* # of remaining asynchronous plans */
-	Bitmapset  *as_needrequest;	/* asynchronous plans needing a new request */
-	struct WaitEventSet *as_eventset;	/* WaitEventSet used to configure
-										 * file descriptor wait events */
+	Bitmapset  *as_needrequest; /* asynchronous plans needing a new request */
+	struct WaitEventSet *as_eventset;	/* WaitEventSet used to configure file
+										 * descriptor wait events */
 	int			as_first_partial_plan;	/* Index of 'appendplans' containing
 										 * the first partial plan */
 	ParallelAppendState *as_pstate; /* parallel coordination info */
@@ -2038,11 +2047,11 @@ typedef struct MaterialState
 	Tuplestorestate *tuplestorestate;
 } MaterialState;
 
-struct ResultCacheEntry;
-struct ResultCacheTuple;
-struct ResultCacheKey;
+struct MemoizeEntry;
+struct MemoizeTuple;
+struct MemoizeKey;
 
-typedef struct ResultCacheInstrumentation
+typedef struct MemoizeInstrumentation
 {
 	uint64		cache_hits;		/* number of rescans where we've found the
 								 * scan parameter values to be cached */
@@ -2055,31 +2064,31 @@ typedef struct ResultCacheInstrumentation
 									 * able to free enough space to store the
 									 * current scan's tuples. */
 	uint64		mem_peak;		/* peak memory usage in bytes */
-} ResultCacheInstrumentation;
+} MemoizeInstrumentation;
 
 /* ----------------
- *	 Shared memory container for per-worker resultcache information
+ *	 Shared memory container for per-worker memoize information
  * ----------------
  */
-typedef struct SharedResultCacheInfo
+typedef struct SharedMemoizeInfo
 {
 	int			num_workers;
-	ResultCacheInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
-} SharedResultCacheInfo;
+	MemoizeInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+} SharedMemoizeInfo;
 
 /* ----------------
- *	 ResultCacheState information
+ *	 MemoizeState information
  *
- *		resultcache nodes are used to cache recent and commonly seen results
- *		from a parameterized scan.
+ *		memoize nodes are used to cache recent and commonly seen results from
+ *		a parameterized scan.
  * ----------------
  */
-typedef struct ResultCacheState
+typedef struct MemoizeState
 {
 	ScanState	ss;				/* its first field is NodeTag */
-	int			rc_status;		/* value of ExecResultCache state machine */
+	int			mstatus;		/* value of ExecMemoize state machine */
 	int			nkeys;			/* number of cache keys */
-	struct resultcache_hash *hashtable; /* hash table for cache entries */
+	struct memoize_hash *hashtable; /* hash table for cache entries */
 	TupleDesc	hashkeydesc;	/* tuple descriptor for cache keys */
 	TupleTableSlot *tableslot;	/* min tuple slot for existing cache entries */
 	TupleTableSlot *probeslot;	/* virtual slot used for hash lookups */
@@ -2092,17 +2101,21 @@ typedef struct ResultCacheState
 	uint64		mem_limit;		/* memory limit in bytes for the cache */
 	MemoryContext tableContext; /* memory context to store cache data */
 	dlist_head	lru_list;		/* least recently used entry list */
-	struct ResultCacheTuple *last_tuple;	/* Used to point to the last tuple
-											 * returned during a cache hit and
-											 * the tuple we last stored when
-											 * populating the cache. */
-	struct ResultCacheEntry *entry; /* the entry that 'last_tuple' belongs to
-									 * or NULL if 'last_tuple' is NULL. */
+	struct MemoizeTuple *last_tuple;	/* Used to point to the last tuple
+										 * returned during a cache hit and the
+										 * tuple we last stored when
+										 * populating the cache. */
+	struct MemoizeEntry *entry; /* the entry that 'last_tuple' belongs to or
+								 * NULL if 'last_tuple' is NULL. */
 	bool		singlerow;		/* true if the cache entry is to be marked as
 								 * complete after caching the first tuple. */
-	ResultCacheInstrumentation stats;	/* execution statistics */
-	SharedResultCacheInfo *shared_info; /* statistics for parallel workers */
-} ResultCacheState;
+	bool		binary_mode;	/* true when cache key should be compared bit
+								 * by bit, false when using hash equality ops */
+	MemoizeInstrumentation stats;	/* execution statistics */
+	SharedMemoizeInfo *shared_info; /* statistics for parallel workers */
+	Bitmapset	   *keyparamids; /* Param->paramids of expressions belonging to
+								  * param_exprs */
+} MemoizeState;
 
 /* ----------------
  *	 When performing sorting by multiple keys, it's possible that the input
@@ -2143,6 +2156,7 @@ typedef struct SortState
 	int64		bound_Done;		/* value of bound we did the sort with */
 	void	   *tuplesortstate; /* private state of tuplesort.c */
 	bool		am_worker;		/* are we a worker? */
+	bool		datumSort;		/* Datum sort instead of tuple sort? */
 	SharedSortInfo *shared_info;	/* one entry per worker */
 } SortState;
 
@@ -2307,7 +2321,7 @@ typedef struct AggState
 	bool		table_filled;	/* hash table filled yet? */
 	int			num_hashes;
 	MemoryContext hash_metacxt; /* memory for hash table itself */
-	struct HashTapeInfo *hash_tapeinfo; /* metadata for spill tapes */
+	struct LogicalTapeSet *hash_tapeset;	/* tape set for hash spill tapes */
 	struct HashAggSpill *hash_spills;	/* HashAggSpill for each grouping set,
 										 * exists only during first pass */
 	TupleTableSlot *hash_spill_rslot;	/* for reading spill files */

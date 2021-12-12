@@ -232,8 +232,25 @@ expand_inherited_rtentry(PlannerInfo *root, RelOptInfo *rel,
 		char		resname[32];
 		List	   *newvars = NIL;
 
-		/* The old PlanRowMark should already have necessitated adding TID */
-		Assert(old_allMarkTypes & ~(1 << ROW_MARK_COPY));
+		/* Add TID junk Var if needed, unless we had it already */
+		if (new_allMarkTypes & ~(1 << ROW_MARK_COPY) &&
+			!(old_allMarkTypes & ~(1 << ROW_MARK_COPY)))
+		{
+			/* Need to fetch TID */
+			var = makeVar(oldrc->rti,
+						  SelfItemPointerAttributeNumber,
+						  TIDOID,
+						  -1,
+						  InvalidOid,
+						  0);
+			snprintf(resname, sizeof(resname), "ctid%u", oldrc->rowmarkId);
+			tle = makeTargetEntry((Expr *) var,
+								  list_length(root->processed_tlist) + 1,
+								  pstrdup(resname),
+								  true);
+			root->processed_tlist = lappend(root->processed_tlist, tle);
+			newvars = lappend(newvars, var);
+		}
 
 		/* Add whole-row junk Var if needed, unless we had it already */
 		if ((new_allMarkTypes & (1 << ROW_MARK_COPY)) &&
@@ -331,7 +348,7 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 	 * that survive pruning.  Below, we will initialize child objects for the
 	 * surviving partitions.
 	 */
-	live_parts = prune_append_rel_partitions(relinfo);
+	relinfo->live_parts = live_parts = prune_append_rel_partitions(relinfo);
 
 	/* Expand simple_rel_array and friends to hold child objects. */
 	num_live_parts = bms_num_members(live_parts);

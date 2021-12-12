@@ -973,6 +973,7 @@ EventTriggerSupportsObjectType(ObjectType obtype)
 		case OBJECT_POLICY:
 		case OBJECT_PROCEDURE:
 		case OBJECT_PUBLICATION:
+		case OBJECT_PUBLICATION_NAMESPACE:
 		case OBJECT_PUBLICATION_REL:
 		case OBJECT_ROUTINE:
 		case OBJECT_RULE:
@@ -1050,6 +1051,7 @@ EventTriggerSupportsObjectClass(ObjectClass objclass)
 		case OCLASS_EXTENSION:
 		case OCLASS_POLICY:
 		case OCLASS_PUBLICATION:
+		case OCLASS_PUBLICATION_NAMESPACE:
 		case OCLASS_PUBLICATION_REL:
 		case OCLASS_SUBSCRIPTION:
 		case OCLASS_TRANSFORM:
@@ -1936,8 +1938,19 @@ pg_event_trigger_ddl_commands(PG_FUNCTION_ARGS)
 					else if (cmd->type == SCT_AlterTSConfig)
 						addr = cmd->d.atscfg.address;
 
-					type = getObjectTypeDescription(&addr, false);
-					identity = getObjectIdentity(&addr, false);
+					/*
+					 * If an object was dropped in the same command we may end
+					 * up in a situation where we generated a message but can
+					 * no longer look for the object information, so skip it
+					 * rather than failing.  This can happen for example with
+					 * some subcommand combinations of ALTER TABLE.
+					 */
+					identity = getObjectIdentity(&addr, true);
+					if (identity == NULL)
+						continue;
+
+					/* The type can never be NULL. */
+					type = getObjectTypeDescription(&addr, true);
 
 					/*
 					 * Obtain schema name, if any ("pg_temp" if a temp
@@ -1971,11 +1984,7 @@ pg_event_trigger_ddl_commands(PG_FUNCTION_ARGS)
 								elog(ERROR,
 									 "invalid null namespace in object %u/%u/%d",
 									 addr.classId, addr.objectId, addr.objectSubId);
-							/* XXX not quite get_namespace_name_or_temp */
-							if (isAnyTempNamespace(schema_oid))
-								schema = pstrdup("pg_temp");
-							else
-								schema = get_namespace_name(schema_oid);
+							schema = get_namespace_name_or_temp(schema_oid);
 
 							table_close(catalog, AccessShareLock);
 						}
@@ -2119,6 +2128,7 @@ stringify_grant_objtype(ObjectType objtype)
 		case OBJECT_OPFAMILY:
 		case OBJECT_POLICY:
 		case OBJECT_PUBLICATION:
+		case OBJECT_PUBLICATION_NAMESPACE:
 		case OBJECT_PUBLICATION_REL:
 		case OBJECT_ROLE:
 		case OBJECT_RULE:
@@ -2201,6 +2211,7 @@ stringify_adefprivs_objtype(ObjectType objtype)
 		case OBJECT_OPFAMILY:
 		case OBJECT_POLICY:
 		case OBJECT_PUBLICATION:
+		case OBJECT_PUBLICATION_NAMESPACE:
 		case OBJECT_PUBLICATION_REL:
 		case OBJECT_ROLE:
 		case OBJECT_RULE:

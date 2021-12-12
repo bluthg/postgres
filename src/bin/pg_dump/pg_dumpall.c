@@ -77,6 +77,7 @@ static int	no_comments = 0;
 static int	no_publications = 0;
 static int	no_security_labels = 0;
 static int	no_subscriptions = 0;
+static int	no_toast_compression = 0;
 static int	no_unlogged_table_data = 0;
 static int	no_role_passwords = 0;
 static int	server_version;
@@ -144,6 +145,7 @@ main(int argc, char *argv[])
 		{"no-security-labels", no_argument, &no_security_labels, 1},
 		{"no-subscriptions", no_argument, &no_subscriptions, 1},
 		{"no-sync", no_argument, NULL, 4},
+		{"no-toast-compression", no_argument, &no_toast_compression, 1},
 		{"no-unlogged-table-data", no_argument, &no_unlogged_table_data, 1},
 		{"on-conflict-do-nothing", no_argument, &on_conflict_do_nothing, 1},
 		{"rows-per-insert", required_argument, NULL, 7},
@@ -428,6 +430,8 @@ main(int argc, char *argv[])
 		appendPQExpBufferStr(pgdumpopts, " --no-security-labels");
 	if (no_subscriptions)
 		appendPQExpBufferStr(pgdumpopts, " --no-subscriptions");
+	if (no_toast_compression)
+		appendPQExpBufferStr(pgdumpopts, " --no-toast-compression");
 	if (no_unlogged_table_data)
 		appendPQExpBufferStr(pgdumpopts, " --no-unlogged-table-data");
 	if (on_conflict_do_nothing)
@@ -651,6 +655,7 @@ help(void)
 	printf(_("  --no-subscriptions           do not dump subscriptions\n"));
 	printf(_("  --no-sync                    do not wait for changes to be written safely to disk\n"));
 	printf(_("  --no-tablespaces             do not dump tablespace assignments\n"));
+	printf(_("  --no-toast-compression       do not dump TOAST compression methods\n"));
 	printf(_("  --no-unlogged-table-data     do not dump unlogged table data\n"));
 	printf(_("  --on-conflict-do-nothing     add ON CONFLICT DO NOTHING to INSERT commands\n"));
 	printf(_("  --quote-all-identifiers      quote all identifiers, even if not key words\n"));
@@ -1161,55 +1166,12 @@ dumpTablespaces(PGconn *conn)
 	/*
 	 * Get all tablespaces except built-in ones (which we assume are named
 	 * pg_xxx)
-	 *
-	 * For the tablespace ACLs, as of 9.6, we extract both the positive (as
-	 * spcacl) and negative (as rspcacl) ACLs, relative to the default ACL for
-	 * tablespaces, which are then passed to buildACLCommands() below.
-	 *
-	 * See buildACLQueries() and buildACLCommands().
-	 *
-	 * The order in which privileges are in the ACL string (the order they
-	 * have been GRANT'd in, which the backend maintains) must be preserved to
-	 * ensure that GRANTs WITH GRANT OPTION and subsequent GRANTs based on
-	 * those are dumped in the correct order.
-	 *
-	 * Note that we do not support initial privileges (pg_init_privs) on
-	 * tablespaces, so this logic cannot make use of buildACLQueries().
 	 */
-	if (server_version >= 90600)
+	if (server_version >= 90200)
 		res = executeQuery(conn, "SELECT oid, spcname, "
 						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
 						   "pg_catalog.pg_tablespace_location(oid), "
-						   "(SELECT array_agg(acl ORDER BY row_n) FROM "
-						   "  (SELECT acl, row_n FROM "
-						   "     unnest(coalesce(spcacl,acldefault('t',spcowner))) "
-						   "     WITH ORDINALITY AS perm(acl,row_n) "
-						   "   WHERE NOT EXISTS ( "
-						   "     SELECT 1 "
-						   "     FROM unnest(acldefault('t',spcowner)) "
-						   "       AS init(init_acl) "
-						   "     WHERE acl = init_acl)) AS spcacls) "
-						   " AS spcacl, "
-						   "(SELECT array_agg(acl ORDER BY row_n) FROM "
-						   "  (SELECT acl, row_n FROM "
-						   "     unnest(acldefault('t',spcowner)) "
-						   "     WITH ORDINALITY AS initp(acl,row_n) "
-						   "   WHERE NOT EXISTS ( "
-						   "     SELECT 1 "
-						   "     FROM unnest(coalesce(spcacl,acldefault('t',spcowner))) "
-						   "       AS permp(orig_acl) "
-						   "     WHERE acl = orig_acl)) AS rspcacls) "
-						   " AS rspcacl, "
-						   "array_to_string(spcoptions, ', '),"
-						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
-						   "FROM pg_catalog.pg_tablespace "
-						   "WHERE spcname !~ '^pg_' "
-						   "ORDER BY 1");
-	else if (server_version >= 90200)
-		res = executeQuery(conn, "SELECT oid, spcname, "
-						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
-						   "pg_catalog.pg_tablespace_location(oid), "
-						   "spcacl, '' as rspcacl, "
+						   "spcacl, acldefault('t', spcowner) AS acldefault, "
 						   "array_to_string(spcoptions, ', '),"
 						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 						   "FROM pg_catalog.pg_tablespace "
@@ -1218,7 +1180,7 @@ dumpTablespaces(PGconn *conn)
 	else if (server_version >= 90000)
 		res = executeQuery(conn, "SELECT oid, spcname, "
 						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
-						   "spclocation, spcacl, '' as rspcacl, "
+						   "spclocation, spcacl, NULL AS acldefault, "
 						   "array_to_string(spcoptions, ', '),"
 						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 						   "FROM pg_catalog.pg_tablespace "
@@ -1227,7 +1189,7 @@ dumpTablespaces(PGconn *conn)
 	else if (server_version >= 80200)
 		res = executeQuery(conn, "SELECT oid, spcname, "
 						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
-						   "spclocation, spcacl, '' as rspcacl, null, "
+						   "spclocation, spcacl, NULL AS acldefault, null, "
 						   "pg_catalog.shobj_description(oid, 'pg_tablespace') "
 						   "FROM pg_catalog.pg_tablespace "
 						   "WHERE spcname !~ '^pg_' "
@@ -1235,7 +1197,7 @@ dumpTablespaces(PGconn *conn)
 	else
 		res = executeQuery(conn, "SELECT oid, spcname, "
 						   "pg_catalog.pg_get_userbyid(spcowner) AS spcowner, "
-						   "spclocation, spcacl, '' as rspcacl, "
+						   "spclocation, spcacl, NULL AS acldefault, "
 						   "null, null "
 						   "FROM pg_catalog.pg_tablespace "
 						   "WHERE spcname !~ '^pg_' "
@@ -1252,7 +1214,7 @@ dumpTablespaces(PGconn *conn)
 		char	   *spcowner = PQgetvalue(res, i, 2);
 		char	   *spclocation = PQgetvalue(res, i, 3);
 		char	   *spcacl = PQgetvalue(res, i, 4);
-		char	   *rspcacl = PQgetvalue(res, i, 5);
+		char	   *acldefault = PQgetvalue(res, i, 5);
 		char	   *spcoptions = PQgetvalue(res, i, 6);
 		char	   *spccomment = PQgetvalue(res, i, 7);
 		char	   *fspcname;
@@ -1271,9 +1233,11 @@ dumpTablespaces(PGconn *conn)
 			appendPQExpBuffer(buf, "ALTER TABLESPACE %s SET (%s);\n",
 							  fspcname, spcoptions);
 
+		/* tablespaces can't have initprivs */
+
 		if (!skip_acls &&
 			!buildACLCommands(fspcname, NULL, NULL, "TABLESPACE",
-							  spcacl, rspcacl,
+							  spcacl, acldefault,
 							  spcowner, "", server_version, buf))
 		{
 			pg_log_error("could not parse ACL list (%s) for tablespace \"%s\"",
@@ -1811,11 +1775,11 @@ connectDatabase(const char *dbname, const char *connection_string,
 	my_version = PG_VERSION_NUM;
 
 	/*
-	 * We allow the server to be back to 8.0, and up to any minor release of
+	 * We allow the server to be back to 8.4, and up to any minor release of
 	 * our own major version.  (See also version check in pg_dump.c.)
 	 */
 	if (my_version != server_version
-		&& (server_version < 80000 ||
+		&& (server_version < 80400 ||
 			(server_version / 100) > (my_version / 100)))
 	{
 		pg_log_error("server version: %s; %s version: %s",

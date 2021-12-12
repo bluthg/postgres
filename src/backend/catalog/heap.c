@@ -146,7 +146,8 @@ static Node *cookConstraint(ParseState *pstate,
 /*
  * The initializers below do not include trailing variable length fields,
  * but that's OK - we're never going to reference anything beyond the
- * fixed-size portion of the structure anyway.
+ * fixed-size portion of the structure anyway.  Fields that can default
+ * to zeroes are also not mentioned.
  */
 
 static const FormData_pg_attribute a1 = {
@@ -157,8 +158,8 @@ static const FormData_pg_attribute a1 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = false,
-	.attstorage = TYPSTORAGE_PLAIN,
 	.attalign = TYPALIGN_SHORT,
+	.attstorage = TYPSTORAGE_PLAIN,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -171,8 +172,8 @@ static const FormData_pg_attribute a2 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = TYPSTORAGE_PLAIN,
 	.attalign = TYPALIGN_INT,
+	.attstorage = TYPSTORAGE_PLAIN,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -185,8 +186,8 @@ static const FormData_pg_attribute a3 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = TYPSTORAGE_PLAIN,
 	.attalign = TYPALIGN_INT,
+	.attstorage = TYPSTORAGE_PLAIN,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -199,8 +200,8 @@ static const FormData_pg_attribute a4 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = TYPSTORAGE_PLAIN,
 	.attalign = TYPALIGN_INT,
+	.attstorage = TYPSTORAGE_PLAIN,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -213,8 +214,8 @@ static const FormData_pg_attribute a5 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = TYPSTORAGE_PLAIN,
 	.attalign = TYPALIGN_INT,
+	.attstorage = TYPSTORAGE_PLAIN,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -233,8 +234,8 @@ static const FormData_pg_attribute a6 = {
 	.attcacheoff = -1,
 	.atttypmod = -1,
 	.attbyval = true,
-	.attstorage = TYPSTORAGE_PLAIN,
 	.attalign = TYPALIGN_INT,
+	.attstorage = TYPSTORAGE_PLAIN,
 	.attnotnull = true,
 	.attislocal = true,
 };
@@ -335,35 +336,12 @@ heap_create(const char *relname,
 	*relfrozenxid = InvalidTransactionId;
 	*relminmxid = InvalidMultiXactId;
 
-	/* Handle reltablespace for specific relkinds. */
-	switch (relkind)
-	{
-		case RELKIND_VIEW:
-		case RELKIND_COMPOSITE_TYPE:
-		case RELKIND_FOREIGN_TABLE:
-
-			/*
-			 * Force reltablespace to zero if the relation has no physical
-			 * storage.  This is mainly just for cleanliness' sake.
-			 *
-			 * Partitioned tables and indexes don't have physical storage
-			 * either, but we want to keep their tablespace settings so that
-			 * their children can inherit it.
-			 */
-			reltablespace = InvalidOid;
-			break;
-
-		case RELKIND_SEQUENCE:
-
-			/*
-			 * Force reltablespace to zero for sequences, since we don't
-			 * support moving them around into different tablespaces.
-			 */
-			reltablespace = InvalidOid;
-			break;
-		default:
-			break;
-	}
+	/*
+	 * Force reltablespace to zero if the relation kind does not support
+	 * tablespaces.  This is mainly just for cleanliness' sake.
+	 */
+	if (!RELKIND_HAS_TABLESPACE(relkind))
+		reltablespace = InvalidOid;
 
 	/*
 	 * Decide whether to create storage. If caller passed a valid relfilenode,
@@ -408,37 +386,20 @@ heap_create(const char *relname,
 	/*
 	 * Have the storage manager create the relation's disk file, if needed.
 	 *
-	 * For relations the callback creates both the main and the init fork, for
-	 * indexes only the main fork is created. The other forks will be created
-	 * on demand.
+	 * For tables, the AM callback creates both the main and the init fork.
+	 * For others, only the main fork is created; the other forks will be
+	 * created on demand.
 	 */
 	if (create_storage)
 	{
-		RelationOpenSmgr(rel);
-
-		switch (rel->rd_rel->relkind)
-		{
-			case RELKIND_VIEW:
-			case RELKIND_COMPOSITE_TYPE:
-			case RELKIND_FOREIGN_TABLE:
-			case RELKIND_PARTITIONED_TABLE:
-			case RELKIND_PARTITIONED_INDEX:
-				Assert(false);
-				break;
-
-			case RELKIND_INDEX:
-			case RELKIND_SEQUENCE:
-				RelationCreateStorage(rel->rd_node, relpersistence);
-				break;
-
-			case RELKIND_RELATION:
-			case RELKIND_TOASTVALUE:
-			case RELKIND_MATVIEW:
-				table_relation_set_new_filenode(rel, &rel->rd_node,
-												relpersistence,
-												relfrozenxid, relminmxid);
-				break;
-		}
+		if (RELKIND_HAS_TABLE_AM(rel->rd_rel->relkind))
+			table_relation_set_new_filenode(rel, &rel->rd_node,
+											relpersistence,
+											relfrozenxid, relminmxid);
+		else if (RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
+			RelationCreateStorage(rel->rd_node, relpersistence);
+		else
+			Assert(false);
 	}
 
 	/*
@@ -724,9 +685,10 @@ CheckAttributeType(const char *attname,
  *		Construct and insert a set of tuples in pg_attribute.
  *
  * Caller has already opened and locked pg_attribute.  tupdesc contains the
- * attributes to insert.  attcacheoff is always initialized to -1, attacl,
- * attfdwoptions and attmissingval are always initialized to NULL.  attoptions
- * must contain the same number of elements as tupdesc, or be NULL.
+ * attributes to insert.  attcacheoff is always initialized to -1.  attoptions
+ * supplies the values for the attoptions fields and must contain the same
+ * number of elements as tupdesc or be NULL.  The other variable-length fields
+ * of pg_attribute are always initialized to null values.
  *
  * indstate is the index state for CatalogTupleInsertWithInfo.  It can be
  * passed as NULL, in which case we'll fetch the necessary info.  (Don't do
@@ -765,6 +727,9 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
 
 		ExecClearTuple(slot[slotCount]);
 
+		memset(slot[slotCount]->tts_isnull, false,
+			   slot[slotCount]->tts_tupleDescriptor->natts * sizeof(bool));
+
 		if (new_rel_oid != InvalidOid)
 			slot[slotCount]->tts_values[Anum_pg_attribute_attrelid - 1] = ObjectIdGetDatum(new_rel_oid);
 		else
@@ -779,8 +744,9 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
 		slot[slotCount]->tts_values[Anum_pg_attribute_attcacheoff - 1] = Int32GetDatum(-1);
 		slot[slotCount]->tts_values[Anum_pg_attribute_atttypmod - 1] = Int32GetDatum(attrs->atttypmod);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attbyval - 1] = BoolGetDatum(attrs->attbyval);
-		slot[slotCount]->tts_values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(attrs->attstorage);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attalign - 1] = CharGetDatum(attrs->attalign);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(attrs->attstorage);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attcompression - 1] = CharGetDatum(attrs->attcompression);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attnotnull - 1] = BoolGetDatum(attrs->attnotnull);
 		slot[slotCount]->tts_values[Anum_pg_attribute_atthasdef - 1] = BoolGetDatum(attrs->atthasdef);
 		slot[slotCount]->tts_values[Anum_pg_attribute_atthasmissing - 1] = BoolGetDatum(attrs->atthasmissing);
@@ -790,7 +756,6 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
 		slot[slotCount]->tts_values[Anum_pg_attribute_attislocal - 1] = BoolGetDatum(attrs->attislocal);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attinhcount - 1] = Int32GetDatum(attrs->attinhcount);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attcollation - 1] = ObjectIdGetDatum(attrs->attcollation);
-		slot[slotCount]->tts_values[Anum_pg_attribute_attcompression - 1] = CharGetDatum(attrs->attcompression);
 		if (attoptions && attoptions[natts] != (Datum) 0)
 			slot[slotCount]->tts_values[Anum_pg_attribute_attoptions - 1] = attoptions[natts];
 		else
@@ -1012,29 +977,16 @@ AddNewRelationTuple(Relation pg_class_desc,
 	 */
 	new_rel_reltup = new_rel_desc->rd_rel;
 
-	switch (relkind)
+	/* The relation is empty */
+	new_rel_reltup->relpages = 0;
+	new_rel_reltup->reltuples = -1;
+	new_rel_reltup->relallvisible = 0;
+
+	/* Sequences always have a known size */
+	if (relkind == RELKIND_SEQUENCE)
 	{
-		case RELKIND_RELATION:
-		case RELKIND_MATVIEW:
-		case RELKIND_INDEX:
-		case RELKIND_TOASTVALUE:
-			/* The relation is real, but as yet empty */
-			new_rel_reltup->relpages = 0;
-			new_rel_reltup->reltuples = -1;
-			new_rel_reltup->relallvisible = 0;
-			break;
-		case RELKIND_SEQUENCE:
-			/* Sequences always have a known size */
-			new_rel_reltup->relpages = 1;
-			new_rel_reltup->reltuples = 1;
-			new_rel_reltup->relallvisible = 0;
-			break;
-		default:
-			/* Views, etc, have no disk storage */
-			new_rel_reltup->relpages = 0;
-			new_rel_reltup->reltuples = -1;
-			new_rel_reltup->relallvisible = 0;
-			break;
+		new_rel_reltup->relpages = 1;
+		new_rel_reltup->reltuples = 1;
 	}
 
 	new_rel_reltup->relfrozenxid = relfrozenxid;
@@ -1119,6 +1071,7 @@ AddNewRelationType(const char *typeName,
  *	reltypeid: OID to assign to rel's rowtype, or InvalidOid to select one
  *	reloftypeid: if a typed table, OID of underlying type; else InvalidOid
  *	ownerid: OID of new rel's owner
+ *	accessmtd: OID of new rel's access method
  *	tupdesc: tuple descriptor (source of column definitions)
  *	cooked_constraints: list of precooked check constraints and defaults
  *	relkind: relkind for new rel
@@ -1231,29 +1184,37 @@ heap_create_with_catalog(const char *relname,
 	if (!OidIsValid(relid))
 	{
 		/* Use binary-upgrade override for pg_class.oid/relfilenode? */
-		if (IsBinaryUpgrade &&
-			(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE ||
-			 relkind == RELKIND_VIEW || relkind == RELKIND_MATVIEW ||
-			 relkind == RELKIND_COMPOSITE_TYPE || relkind == RELKIND_FOREIGN_TABLE ||
-			 relkind == RELKIND_PARTITIONED_TABLE))
+		if (IsBinaryUpgrade)
 		{
-			if (!OidIsValid(binary_upgrade_next_heap_pg_class_oid))
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("pg_class heap OID value not set when in binary upgrade mode")));
+			/*
+			 * Indexes are not supported here; they use
+			 * binary_upgrade_next_index_pg_class_oid.
+			 */
+			Assert(relkind != RELKIND_INDEX);
+			Assert(relkind != RELKIND_PARTITIONED_INDEX);
 
-			relid = binary_upgrade_next_heap_pg_class_oid;
-			binary_upgrade_next_heap_pg_class_oid = InvalidOid;
+			if (relkind == RELKIND_TOASTVALUE)
+			{
+				/* There might be no TOAST table, so we have to test for it. */
+				if (OidIsValid(binary_upgrade_next_toast_pg_class_oid))
+				{
+					relid = binary_upgrade_next_toast_pg_class_oid;
+					binary_upgrade_next_toast_pg_class_oid = InvalidOid;
+				}
+			}
+			else
+			{
+				if (!OidIsValid(binary_upgrade_next_heap_pg_class_oid))
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("pg_class heap OID value not set when in binary upgrade mode")));
+
+				relid = binary_upgrade_next_heap_pg_class_oid;
+				binary_upgrade_next_heap_pg_class_oid = InvalidOid;
+			}
 		}
-		/* There might be no TOAST table, so we have to test for it. */
-		else if (IsBinaryUpgrade &&
-				 OidIsValid(binary_upgrade_next_toast_pg_class_oid) &&
-				 relkind == RELKIND_TOASTVALUE)
-		{
-			relid = binary_upgrade_next_toast_pg_class_oid;
-			binary_upgrade_next_toast_pg_class_oid = InvalidOid;
-		}
-		else
+
+		if (!OidIsValid(relid))
 			relid = GetNewRelFileNode(reltablespace, pg_class_desc,
 									  relpersistence);
 	}
@@ -1464,13 +1425,12 @@ heap_create_with_catalog(const char *relname,
 
 		/*
 		 * Make a dependency link to force the relation to be deleted if its
-		 * access method is. Do this only for relation and materialized views.
+		 * access method is.
 		 *
 		 * No need to add an explicit dependency for the toast table, as the
 		 * main table depends on it.
 		 */
-		if (relkind == RELKIND_RELATION ||
-			relkind == RELKIND_MATVIEW)
+		if (RELKIND_HAS_TABLE_AM(relkind) && relkind != RELKIND_TOASTVALUE)
 		{
 			ObjectAddressSet(referenced, AccessMethodRelationId, accessmtd);
 			add_exact_object_address(&referenced, addrs);
@@ -1716,8 +1676,6 @@ RemoveAttributeById(Oid relid, AttrNumber attnum)
 
 		/* Unset this so no one tries to look up the generation expression */
 		attStruct->attgenerated = '\0';
-
-		attStruct->attcompression = InvalidCompressionMethod;
 
 		/*
 		 * Change the column name to something that isn't likely to conflict
@@ -2161,6 +2119,13 @@ SetAttrMissing(Oid relid, char *attname, char *value)
 	/* lock the table the attribute belongs to */
 	tablerel = table_open(relid, AccessExclusiveLock);
 
+	/* Don't do anything unless it's a plain table */
+	if (tablerel->rd_rel->relkind != RELKIND_RELATION)
+	{
+		table_close(tablerel, AccessExclusiveLock);
+		return;
+	}
+
 	/* Lock the attribute row and get the data */
 	attrrel = table_open(AttributeRelationId, RowExclusiveLock);
 	atttup = SearchSysCacheAttName(relid, attname);
@@ -2287,7 +2252,8 @@ StoreAttrDefault(Relation rel, AttrNumber attnum,
 		valuesAtt[Anum_pg_attribute_atthasdef - 1] = true;
 		replacesAtt[Anum_pg_attribute_atthasdef - 1] = true;
 
-		if (add_column_mode && !attgenerated)
+		if (rel->rd_rel->relkind == RELKIND_RELATION && add_column_mode &&
+			!attgenerated)
 		{
 			expr2 = expression_planner(expr2);
 			estate = CreateExecutorState();
@@ -2356,7 +2322,7 @@ StoreAttrDefault(Relation rel, AttrNumber attnum,
 		 */
 		recordDependencyOnSingleRelExpr(&colobject, expr, RelationGetRelid(rel),
 										DEPENDENCY_AUTO,
-										DEPENDENCY_AUTO, false, false);
+										DEPENDENCY_AUTO, false);
 	}
 	else
 	{
@@ -2366,7 +2332,7 @@ StoreAttrDefault(Relation rel, AttrNumber attnum,
 		 */
 		recordDependencyOnSingleRelExpr(&defobject, expr, RelationGetRelid(rel),
 										DEPENDENCY_NORMAL,
-										DEPENDENCY_NORMAL, false, false);
+										DEPENDENCY_NORMAL, false);
 	}
 
 	/*
@@ -2475,6 +2441,8 @@ StoreRelCheck(Relation rel, const char *ccname, Node *expr,
 							  0,
 							  ' ',
 							  ' ',
+							  NULL,
+							  0,
 							  ' ',
 							  NULL, /* not an exclusion constraint */
 							  expr, /* Tree form of check constraint */
@@ -3019,15 +2987,26 @@ check_nested_generated_walker(Node *node, void *context)
 		AttrNumber	attnum;
 
 		relid = rt_fetch(var->varno, pstate->p_rtable)->relid;
+		if (!OidIsValid(relid))
+			return false;		/* XXX shouldn't we raise an error? */
+
 		attnum = var->varattno;
 
-		if (OidIsValid(relid) && AttributeNumberIsValid(attnum) && get_attgenerated(relid, attnum))
+		if (attnum > 0 && get_attgenerated(relid, attnum))
 			ereport(ERROR,
-					(errcode(ERRCODE_SYNTAX_ERROR),
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 					 errmsg("cannot use generated column \"%s\" in column generation expression",
 							get_attname(relid, attnum, false)),
 					 errdetail("A generated column cannot reference another generated column."),
 					 parser_errposition(pstate, var->location)));
+		/* A whole-row Var is necessarily self-referential, so forbid it */
+		if (attnum == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("cannot use whole-row variable in column generation expression"),
+					 errdetail("This would cause the generated column to depend on its own value."),
+					 parser_errposition(pstate, var->location)));
+		/* System columns were already checked in the parser */
 
 		return false;
 	}
@@ -3530,7 +3509,7 @@ restart:
 		/*
 		 * If this constraint has a parent constraint which we have not seen
 		 * yet, keep track of it for the second loop, below.  Tracking parent
-		 * constraints allows us to climb up to the top-level level constraint
+		 * constraints allows us to climb up to the top-level constraint
 		 * and look for all possible relations referencing the partitioned
 		 * table.
 		 */
@@ -3728,8 +3707,7 @@ StorePartitionKey(Relation rel,
 										RelationGetRelid(rel),
 										DEPENDENCY_NORMAL,
 										DEPENDENCY_INTERNAL,
-										true /* reverse the self-deps */ ,
-										false /* don't track versions */ );
+										true /* reverse the self-deps */ );
 
 	/*
 	 * We must invalidate the relcache so that the next
@@ -3839,7 +3817,7 @@ StorePartitionBound(Relation rel, Relation parent, PartitionBoundSpec *bound)
 	 * removed.
 	 */
 	defaultPartOid =
-		get_default_oid_from_partdesc(RelationGetPartitionDesc(parent, false));
+		get_default_oid_from_partdesc(RelationGetPartitionDesc(parent, true));
 	if (OidIsValid(defaultPartOid))
 		CacheInvalidateRelcacheByRelid(defaultPartOid);
 

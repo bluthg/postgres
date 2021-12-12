@@ -23,7 +23,6 @@
 #include "catalog/catalog.h"
 #include "common/pg_lzcompress.h"
 #include "miscadmin.h"
-#include "pgstat.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
@@ -49,14 +48,16 @@ toast_compress_datum(Datum value, char cmethod)
 {
 	struct varlena *tmp = NULL;
 	int32		valsize;
-	ToastCompressionId	cmid = TOAST_INVALID_COMPRESSION_ID;
+	ToastCompressionId cmid = TOAST_INVALID_COMPRESSION_ID;
 
 	Assert(!VARATT_IS_EXTERNAL(DatumGetPointer(value)));
 	Assert(!VARATT_IS_COMPRESSED(DatumGetPointer(value)));
 
-	Assert(CompressionMethodIsValid(cmethod));
-
 	valsize = VARSIZE_ANY_EXHDR(DatumGetPointer(value));
+
+	/* If the compression method is not valid, use the current default */
+	if (!CompressionMethodIsValid(cmethod))
+		cmethod = default_toast_compression;
 
 	/*
 	 * Call appropriate compression routine for the compression method.
@@ -159,21 +160,6 @@ toast_save_datum(Relation rel, Datum value,
 									RowExclusiveLock,
 									&toastidxs,
 									&num_indexes);
-
-
-	/*
-	 * heap_insert does call pgstat_count_heap_insert() but for our little
-	 * excercise we want to differenciate and count specifically.
-	 * Now the question becomes, do we need a different member in the
-	 * relcache to attach this stat? If we use the same statcounter as we do
-	 * on the newly introduced pgstat_count_toast_insert(), then we will
-	 * actually count the insertion twice, once in heap_insert via
-	 * pgstat_count_heap_insert and once here.
-	 *
-	 * Also the location of this call is off as it might be more data in the
-	 * tuple to be inserted, so this will have to be adjusted also.
-	 */
-	pgstat_count_toast_insert(toastrel, 1);
 
 	/*
 	 * Get the data pointer and length, and compute va_rawsize and va_extinfo.
@@ -373,10 +359,12 @@ toast_save_datum(Relation rel, Datum value,
 	}
 
 	/*
-	 * Done - close toast relation and its indexes
+	 * Done - close toast relation and its indexes but keep the lock until
+	 * commit, so as a concurrent reindex done directly on the toast relation
+	 * would be able to wait for this transaction.
 	 */
-	toast_close_indexes(toastidxs, num_indexes, RowExclusiveLock);
-	table_close(toastrel, RowExclusiveLock);
+	toast_close_indexes(toastidxs, num_indexes, NoLock);
+	table_close(toastrel, NoLock);
 
 	/*
 	 * Create the TOAST pointer value that we'll return
@@ -453,11 +441,13 @@ toast_delete_datum(Relation rel, Datum value, bool is_speculative)
 	}
 
 	/*
-	 * End scan and close relations
+	 * End scan and close relations but keep the lock until commit, so as a
+	 * concurrent reindex done directly on the toast relation would be able to
+	 * wait for this transaction.
 	 */
 	systable_endscan_ordered(toastscan);
-	toast_close_indexes(toastidxs, num_indexes, RowExclusiveLock);
-	table_close(toastrel, RowExclusiveLock);
+	toast_close_indexes(toastidxs, num_indexes, NoLock);
+	table_close(toastrel, NoLock);
 }
 
 /* ----------
@@ -654,8 +644,21 @@ init_toast_snapshot(Snapshot toast_snapshot)
 {
 	Snapshot	snapshot = GetOldestSnapshot();
 
+	/*
+	 * GetOldestSnapshot returns NULL if the session has no active snapshots.
+	 * We can get that if, for example, a procedure fetches a toasted value
+	 * into a local variable, commits, and then tries to detoast the value.
+	 * Such coding is unsafe, because once we commit there is nothing to
+	 * prevent the toast data from being deleted.  Detoasting *must* happen in
+	 * the same transaction that originally fetched the toast pointer.  Hence,
+	 * rather than trying to band-aid over the problem, throw an error.  (This
+	 * is not very much protection, because in many scenarios the procedure
+	 * would have already created a new transaction snapshot, preventing us
+	 * from detecting the problem.  But it's better than nothing, and for sure
+	 * we shouldn't expend code on masking the problem more.)
+	 */
 	if (snapshot == NULL)
-		elog(ERROR, "no known snapshots");
+		elog(ERROR, "cannot fetch toast data without an active snapshot");
 
 	InitToastSnapshot(*toast_snapshot, snapshot->lsn, snapshot->whenTaken);
 }

@@ -459,14 +459,24 @@ MarkAsPreparingGuts(GlobalTransaction gxact, TransactionId xid, const char *gid,
 	proc->pgprocno = gxact->pgprocno;
 	SHMQueueElemInit(&(proc->links));
 	proc->waitStatus = PROC_WAIT_STATUS_OK;
-	/* We set up the gxact's VXID as InvalidBackendId/XID */
-	proc->lxid = (LocalTransactionId) xid;
+	if (LocalTransactionIdIsValid(MyProc->lxid))
+	{
+		/* clone VXID, for TwoPhaseGetXidByVirtualXID() to find */
+		proc->lxid = MyProc->lxid;
+		proc->backendId = MyBackendId;
+	}
+	else
+	{
+		Assert(AmStartupProcess() || !IsPostmasterEnvironment);
+		/* GetLockConflicts() uses this to specify a wait on the XID */
+		proc->lxid = xid;
+		proc->backendId = InvalidBackendId;
+	}
 	proc->xid = xid;
 	Assert(proc->xmin == InvalidTransactionId);
 	proc->delayChkpt = false;
 	proc->statusFlags = 0;
 	proc->pid = 0;
-	proc->backendId = InvalidBackendId;
 	proc->databaseId = databaseid;
 	proc->roleId = owner;
 	proc->tempNamespaceId = InvalidOid;
@@ -847,6 +857,53 @@ TwoPhaseGetGXact(TransactionId xid, bool lock_held)
 }
 
 /*
+ * TwoPhaseGetXidByVirtualXID
+ *		Lookup VXID among xacts prepared since last startup.
+ *
+ * (This won't find recovered xacts.)  If more than one matches, return any
+ * and set "have_more" to true.  To witness multiple matches, a single
+ * BackendId must consume 2^32 LXIDs, with no intervening database restart.
+ */
+TransactionId
+TwoPhaseGetXidByVirtualXID(VirtualTransactionId vxid,
+						   bool *have_more)
+{
+	int			i;
+	TransactionId result = InvalidTransactionId;
+
+	Assert(VirtualTransactionIdIsValid(vxid));
+	LWLockAcquire(TwoPhaseStateLock, LW_SHARED);
+
+	for (i = 0; i < TwoPhaseState->numPrepXacts; i++)
+	{
+		GlobalTransaction gxact = TwoPhaseState->prepXacts[i];
+		PGPROC	   *proc;
+		VirtualTransactionId proc_vxid;
+
+		if (!gxact->valid)
+			continue;
+		proc = &ProcGlobal->allProcs[gxact->pgprocno];
+		GET_VXID_FROM_PGPROC(proc_vxid, *proc);
+		if (VirtualTransactionIdEquals(vxid, proc_vxid))
+		{
+			/* Startup process sets proc->backendId to InvalidBackendId. */
+			Assert(!gxact->inredo);
+
+			if (result != InvalidTransactionId)
+			{
+				*have_more = true;
+				break;
+			}
+			result = gxact->xid;
+		}
+	}
+
+	LWLockRelease(TwoPhaseStateLock);
+
+	return result;
+}
+
+/*
  * TwoPhaseGetDummyBackendId
  *		Get the dummy backend ID for prepared transaction specified by XID
  *
@@ -1134,9 +1191,9 @@ EndPrepare(GlobalTransaction gxact)
 	gxact->prepare_start_lsn = ProcLastRecPtr;
 
 	/*
-	 * Mark the prepared transaction as valid.  As soon as xact.c marks
-	 * MyProc as not running our XID (which it will do immediately after
-	 * this function returns), others can commit/rollback the xact.
+	 * Mark the prepared transaction as valid.  As soon as xact.c marks MyProc
+	 * as not running our XID (which it will do immediately after this
+	 * function returns), others can commit/rollback the xact.
 	 *
 	 * NB: a side effect of this is to make a dummy ProcArray entry for the
 	 * prepared XID.  This must happen before we clear the XID from MyProc /
@@ -1316,11 +1373,7 @@ ReadTwoPhaseFile(TransactionId xid, bool missing_ok)
  * twophase files and ReadTwoPhaseFile should be used instead.
  *
  * Note clearly that this function can access WAL during normal operation,
- * similarly to the way WALSender or Logical Decoding would do.  While
- * accessing WAL, read_local_xlog_page() may change ThisTimeLineID,
- * particularly if this routine is called for the end-of-recovery checkpoint
- * in the checkpointer itself, so save the current timeline number value
- * and restore it once done.
+ * similarly to the way WALSender or Logical Decoding would do.
  */
 static void
 XlogReadTwoPhaseData(XLogRecPtr lsn, char **buf, int *len)
@@ -1328,7 +1381,6 @@ XlogReadTwoPhaseData(XLogRecPtr lsn, char **buf, int *len)
 	XLogRecord *record;
 	XLogReaderState *xlogreader;
 	char	   *errormsg;
-	TimeLineID	save_currtli = ThisTimeLineID;
 
 	xlogreader = XLogReaderAllocate(wal_segment_size, NULL,
 									XL_ROUTINE(.page_read = &read_local_xlog_page,
@@ -1344,18 +1396,19 @@ XlogReadTwoPhaseData(XLogRecPtr lsn, char **buf, int *len)
 	XLogBeginRead(xlogreader, lsn);
 	record = XLogReadRecord(xlogreader, &errormsg);
 
-	/*
-	 * Restore immediately the timeline where it was previously, as
-	 * read_local_xlog_page() could have changed it if the record was read
-	 * while recovery was finishing or if the timeline has jumped in-between.
-	 */
-	ThisTimeLineID = save_currtli;
-
 	if (record == NULL)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not read two-phase state from WAL at %X/%X",
-						LSN_FORMAT_ARGS(lsn))));
+	{
+		if (errormsg)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read two-phase state from WAL at %X/%X: %s",
+							LSN_FORMAT_ARGS(lsn), errormsg)));
+		else
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read two-phase state from WAL at %X/%X",
+							LSN_FORMAT_ARGS(lsn))));
+	}
 
 	if (XLogRecGetRmid(xlogreader) != RM_XACT_ID ||
 		(XLogRecGetInfo(xlogreader) & XLOG_XACT_OPMASK) != XLOG_XACT_PREPARE)
@@ -1520,13 +1573,17 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	 * Handle cache invalidation messages.
 	 *
 	 * Relcache init file invalidation requires processing both before and
-	 * after we send the SI messages. See AtEOXact_Inval()
+	 * after we send the SI messages, only when committing.  See
+	 * AtEOXact_Inval().
 	 */
-	if (hdr->initfileinval)
-		RelationCacheInitFilePreInvalidate();
-	SendSharedInvalidMessages(invalmsgs, hdr->ninvalmsgs);
-	if (hdr->initfileinval)
-		RelationCacheInitFilePostInvalidate();
+	if (isCommit)
+	{
+		if (hdr->initfileinval)
+			RelationCacheInitFilePreInvalidate();
+		SendSharedInvalidMessages(invalmsgs, hdr->ninvalmsgs);
+		if (hdr->initfileinval)
+			RelationCacheInitFilePostInvalidate();
+	}
 
 	/*
 	 * Acquire the two-phase lock.  We want to work on the two-phase callbacks
@@ -2244,7 +2301,7 @@ RecordTransactionCommitPrepared(TransactionId xid,
 
 	TransactionTreeSetCommitTsData(xid, nchildren, children,
 								   replorigin_session_origin_timestamp,
-								   replorigin_session_origin, false);
+								   replorigin_session_origin);
 
 	/*
 	 * We don't currently try to sleep before flush here ... nor is there any
@@ -2457,4 +2514,72 @@ PrepareRedoRemove(TransactionId xid, bool giveWarning)
 	if (gxact->ondisk)
 		RemoveTwoPhaseFile(xid, giveWarning);
 	RemoveGXact(gxact);
+}
+
+/*
+ * LookupGXact
+ *		Check if the prepared transaction with the given GID, lsn and timestamp
+ *		exists.
+ *
+ * Note that we always compare with the LSN where prepare ends because that is
+ * what is stored as origin_lsn in the 2PC file.
+ *
+ * This function is primarily used to check if the prepared transaction
+ * received from the upstream (remote node) already exists. Checking only GID
+ * is not sufficient because a different prepared xact with the same GID can
+ * exist on the same node. So, we are ensuring to match origin_lsn and
+ * origin_timestamp of prepared xact to avoid the possibility of a match of
+ * prepared xact from two different nodes.
+ */
+bool
+LookupGXact(const char *gid, XLogRecPtr prepare_end_lsn,
+			TimestampTz origin_prepare_timestamp)
+{
+	int			i;
+	bool		found = false;
+
+	LWLockAcquire(TwoPhaseStateLock, LW_SHARED);
+	for (i = 0; i < TwoPhaseState->numPrepXacts; i++)
+	{
+		GlobalTransaction gxact = TwoPhaseState->prepXacts[i];
+
+		/* Ignore not-yet-valid GIDs. */
+		if (gxact->valid && strcmp(gxact->gid, gid) == 0)
+		{
+			char	   *buf;
+			TwoPhaseFileHeader *hdr;
+
+			/*
+			 * We are not expecting collisions of GXACTs (same gid) between
+			 * publisher and subscribers, so we perform all I/O while holding
+			 * TwoPhaseStateLock for simplicity.
+			 *
+			 * To move the I/O out of the lock, we need to ensure that no
+			 * other backend commits the prepared xact in the meantime. We can
+			 * do this optimization if we encounter many collisions in GID
+			 * between publisher and subscriber.
+			 */
+			if (gxact->ondisk)
+				buf = ReadTwoPhaseFile(gxact->xid, false);
+			else
+			{
+				Assert(gxact->prepare_start_lsn);
+				XlogReadTwoPhaseData(gxact->prepare_start_lsn, &buf, NULL);
+			}
+
+			hdr = (TwoPhaseFileHeader *) buf;
+
+			if (hdr->origin_lsn == prepare_end_lsn &&
+				hdr->origin_timestamp == origin_prepare_timestamp)
+			{
+				found = true;
+				pfree(buf);
+				break;
+			}
+
+			pfree(buf);
+		}
+	}
+	LWLockRelease(TwoPhaseStateLock);
+	return found;
 }

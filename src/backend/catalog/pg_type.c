@@ -15,7 +15,6 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
-#include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
@@ -168,6 +167,7 @@ TypeShellMake(const char *typeName, Oid typeNamespace, Oid ownerId)
 								 0,
 								 false,
 								 false,
+								 true,	/* make extension dependency */
 								 false);
 
 	/* Post creation hook for new shell type */
@@ -505,6 +505,7 @@ TypeCreate(Oid newTypeOid,
 								 relationKind,
 								 isImplicitArray,
 								 isDependentType,
+								 true,	/* make extension dependency */
 								 rebuildDeps);
 
 	/* Post creation hook for new type */
@@ -518,65 +519,6 @@ TypeCreate(Oid newTypeOid,
 	table_close(pg_type_desc, RowExclusiveLock);
 
 	return address;
-}
-
-/*
- * Get a list of all distinct collations that the given type depends on.
- */
-List *
-GetTypeCollations(Oid typeoid)
-{
-	List	   *result = NIL;
-	HeapTuple	tuple;
-	Form_pg_type typeTup;
-
-	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typeoid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for type %u", typeoid);
-	typeTup = (Form_pg_type) GETSTRUCT(tuple);
-
-	if (OidIsValid(typeTup->typcollation))
-		result = list_append_unique_oid(result, typeTup->typcollation);
-	else if (typeTup->typtype == TYPTYPE_COMPOSITE)
-	{
-		Relation	rel = relation_open(typeTup->typrelid, AccessShareLock);
-		TupleDesc	desc = RelationGetDescr(rel);
-
-		for (int i = 0; i < RelationGetNumberOfAttributes(rel); i++)
-		{
-			Form_pg_attribute att = TupleDescAttr(desc, i);
-
-			if (OidIsValid(att->attcollation))
-				result = list_append_unique_oid(result, att->attcollation);
-			else
-				result = list_concat_unique_oid(result,
-												GetTypeCollations(att->atttypid));
-		}
-
-		relation_close(rel, NoLock);
-	}
-	else if (typeTup->typtype == TYPTYPE_DOMAIN)
-	{
-		Assert(OidIsValid(typeTup->typbasetype));
-
-		result = list_concat_unique_oid(result,
-										GetTypeCollations(typeTup->typbasetype));
-	}
-	else if (typeTup->typtype == TYPTYPE_RANGE)
-	{
-		Oid			rangeid = get_range_subtype(typeTup->oid);
-
-		Assert(OidIsValid(rangeid));
-
-		result = list_concat_unique_oid(result, GetTypeCollations(rangeid));
-	}
-	else if (OidIsValid(typeTup->typelem))
-		result = list_concat_unique_oid(result,
-										GetTypeCollations(typeTup->typelem));
-
-	ReleaseSysCache(tuple);
-
-	return result;
 }
 
 /*
@@ -597,13 +539,17 @@ GetTypeCollations(Oid typeoid)
  * isDependentType is true if this is an implicit array or relation rowtype;
  * that means it doesn't need its own dependencies on owner etc.
  *
- * If rebuild is true, we remove existing dependencies and rebuild them
- * from scratch.  This is needed for ALTER TYPE, and also when replacing
- * a shell type.  We don't remove an existing extension dependency, though.
- * (That means an extension can't absorb a shell type created in another
- * extension, nor ALTER a type created by another extension.  Also, if it
- * replaces a free-standing shell type or ALTERs a free-standing type,
- * that type will become a member of the extension.)
+ * We make an extension-membership dependency if we're in an extension
+ * script and makeExtensionDep is true (and isDependentType isn't true).
+ * makeExtensionDep should be true when creating a new type or replacing a
+ * shell type, but not for ALTER TYPE on an existing type.  Passing false
+ * causes the type's extension membership to be left alone.
+ *
+ * rebuild should be true if this is a pre-existing type.  We will remove
+ * existing dependencies and rebuild them from scratch.  This is needed for
+ * ALTER TYPE, and also when replacing a shell type.  We don't remove any
+ * existing extension dependency, though (hence, if makeExtensionDep is also
+ * true and the type belongs to some other extension, an error will occur).
  */
 void
 GenerateTypeDependencies(HeapTuple typeTuple,
@@ -613,6 +559,7 @@ GenerateTypeDependencies(HeapTuple typeTuple,
 						 char relationKind, /* only for relation rowtypes */
 						 bool isImplicitArray,
 						 bool isDependentType,
+						 bool makeExtensionDep,
 						 bool rebuild)
 {
 	Form_pg_type typeForm = (Form_pg_type) GETSTRUCT(typeTuple);
@@ -671,7 +618,8 @@ GenerateTypeDependencies(HeapTuple typeTuple,
 		recordDependencyOnNewAcl(TypeRelationId, typeObjectId, 0,
 								 typeForm->typowner, typacl);
 
-		recordDependencyOnCurrentExtension(&myself, rebuild);
+		if (makeExtensionDep)
+			recordDependencyOnCurrentExtension(&myself, rebuild);
 	}
 
 	/* Normal dependencies on the I/O and support functions */
@@ -979,7 +927,7 @@ makeMultirangeTypeName(const char *rangeTypeName, Oid typeNamespace)
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
 				 errmsg("type \"%s\" already exists", buf),
 				 errdetail("Failed while creating a multirange type for type \"%s\".", rangeTypeName),
-				 errhint("You can manually specify a multirange type name using the \"multirange_type_name\" attribute")));
+				 errhint("You can manually specify a multirange type name using the \"multirange_type_name\" attribute.")));
 
 	return pstrdup(buf);
 }
@@ -988,7 +936,7 @@ makeMultirangeTypeName(const char *rangeTypeName, Oid typeNamespace)
  * makeUniqueTypeName
  *		Generate a unique name for a prospective new type
  *
- * Given a typeName, return a new palloc'ed name by preprending underscores
+ * Given a typeName, return a new palloc'ed name by prepending underscores
  * until a non-conflicting name results.
  *
  * If tryOriginal, first try with zero underscores.

@@ -30,7 +30,6 @@
 #include "fe-auth.h"
 #include "fe-secure-common.h"
 #include "libpq-int.h"
-#include "common/openssl.h"
 
 #ifdef WIN32
 #include "win32.h"
@@ -55,12 +54,19 @@
 #endif
 #endif
 
-#include <openssl/ssl.h>
+/*
+ * These SSL-related #includes must come after all system-provided headers.
+ * This ensures that OpenSSL can take care of conflicts with Windows'
+ * <wincrypt.h> by #undef'ing the conflicting macros.  (We don't directly
+ * include <wincrypt.h>, but some other Windows headers do.)
+ */
+#include "common/openssl.h"
 #include <openssl/conf.h>
 #ifdef USE_SSL_ENGINE
 #include <openssl/engine.h>
 #endif
 #include <openssl/x509v3.h>
+
 
 static int	verify_cb(int ok, X509_STORE_CTX *ctx);
 static int	openssl_verify_peer_name_matches_certificate_name(PGconn *conn,
@@ -611,15 +617,20 @@ static pthread_mutex_t *pq_lockarray;
 static void
 pq_lockingcallback(int mode, int n, const char *file, int line)
 {
+	/*
+	 * There's no way to report a mutex-primitive failure, so we just Assert
+	 * in development builds, and ignore any errors otherwise.  Fortunately
+	 * this is all obsolete in modern OpenSSL.
+	 */
 	if (mode & CRYPTO_LOCK)
 	{
 		if (pthread_mutex_lock(&pq_lockarray[n]))
-			PGTHREAD_ERROR("failed to lock mutex");
+			Assert(false);
 	}
 	else
 	{
 		if (pthread_mutex_unlock(&pq_lockarray[n]))
-			PGTHREAD_ERROR("failed to unlock mutex");
+			Assert(false);
 	}
 }
 #endif							/* ENABLE_THREAD_SAFETY && HAVE_CRYPTO_LOCK */
@@ -943,8 +954,8 @@ initialize_SSL(PGconn *conn)
 
 		if ((cvstore = SSL_CTX_get_cert_store(SSL_context)) != NULL)
 		{
-			char   *fname = NULL;
-			char   *dname = NULL;
+			char	   *fname = NULL;
+			char	   *dname = NULL;
 
 			if (conn->sslcrl && strlen(conn->sslcrl) > 0)
 				fname = conn->sslcrl;
@@ -1083,6 +1094,32 @@ initialize_SSL(PGconn *conn)
 	SSL_context = NULL;
 
 	/*
+	 * Set Server Name Indication (SNI), if enabled by connection parameters.
+	 * Per RFC 6066, do not set it if the host is a literal IP address (IPv4
+	 * or IPv6).
+	 */
+	if (conn->sslsni && conn->sslsni[0] == '1')
+	{
+		const char *host = conn->connhost[conn->whichhost].host;
+
+		if (host && host[0] &&
+			!(strspn(host, "0123456789.") == strlen(host) ||
+			  strchr(host, ':')))
+		{
+			if (SSL_set_tlsext_host_name(conn->ssl, host) != 1)
+			{
+				char	   *err = SSLerrmessage(ERR_get_error());
+
+				appendPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("could not set SSL Server Name Indication (SNI): %s\n"),
+								  err);
+				SSLerrfree(err);
+				return -1;
+			}
+		}
+	}
+
+	/*
 	 * Read the SSL key. If a key is specified, treat it as an engine:key
 	 * combination if there is colon present - we don't support files with
 	 * colon in the name. The exception is if the second character is a colon,
@@ -1198,9 +1235,14 @@ initialize_SSL(PGconn *conn)
 
 		if (stat(fnbuf, &buf) != 0)
 		{
-			appendPQExpBuffer(&conn->errorMessage,
-							  libpq_gettext("certificate present, but not private key file \"%s\"\n"),
-							  fnbuf);
+			if (errno == ENOENT)
+				appendPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("certificate present, but not private key file \"%s\"\n"),
+								  fnbuf);
+			else
+				appendPQExpBuffer(&conn->errorMessage,
+								  libpq_gettext("could not stat private key file \"%s\": %m\n"),
+								  fnbuf);
 			return -1;
 		}
 #ifndef WIN32
@@ -1445,8 +1487,8 @@ pgtls_close(PGconn *conn)
 	{
 		/*
 		 * In the non-SSL case, just remove the crypto callbacks if the
-		 * connection has then loaded.  This code path has no dependency
-		 * on any pending SSL calls.
+		 * connection has then loaded.  This code path has no dependency on
+		 * any pending SSL calls.
 		 */
 		if (conn->crypto_loaded)
 			destroy_needed = true;
@@ -1675,6 +1717,7 @@ my_BIO_s_socket(void)
 		my_bio_index = BIO_get_new_index();
 		if (my_bio_index == -1)
 			return NULL;
+		my_bio_index |= (BIO_TYPE_DESCRIPTOR | BIO_TYPE_SOURCE_SINK);
 		my_bio_methods = BIO_meth_new(my_bio_index, "libpq socket");
 		if (!my_bio_methods)
 			return NULL;

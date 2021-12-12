@@ -32,10 +32,6 @@
 
 #define LOBBUFSIZE 16384
 
-/*
- * Note: zlib.h must be included *after* libpq-fe.h, because the latter may
- * include ssl.h, which has a naming conflict with zlib.h.
- */
 #ifdef HAVE_LIBZ
 #include <zlib.h>
 #define GZCLOSE(fh) gzclose(fh)
@@ -393,7 +389,8 @@ struct _tocEntry
 
 	/* working state while dumping/restoring */
 	pgoff_t		dataLength;		/* item's data size; 0 if none or unknown */
-	int			reqs;			/* do we need schema and/or data of object (REQ_* bit mask) */
+	int			reqs;			/* do we need schema and/or data of object
+								 * (REQ_* bit mask) */
 	bool		created;		/* set for DATA member if TABLE was created */
 
 	/* working state (needed only for parallel restore) */
@@ -443,7 +440,7 @@ extern void WriteDataChunksForTocEntry(ArchiveHandle *AH, TocEntry *te);
 extern ArchiveHandle *CloneArchive(ArchiveHandle *AH);
 extern void DeCloneArchive(ArchiveHandle *AH);
 
-extern int TocIDRequired(ArchiveHandle *AH, DumpId id);
+extern int	TocIDRequired(ArchiveHandle *AH, DumpId id);
 TocEntry   *getTocEntryByDumpId(ArchiveHandle *AH, DumpId id);
 extern bool checkSeek(FILE *fp);
 

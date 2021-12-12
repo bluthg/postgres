@@ -1,11 +1,14 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # Testing of commit timestamps preservation across restarts
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 16;
 
-my $node_primary = get_new_node('primary');
+my $node_primary = PostgreSQL::Test::Cluster->new('primary');
 $node_primary->init(allows_streaming => 1);
 $node_primary->append_conf('postgresql.conf', 'track_commit_timestamp = on');
 $node_primary->start;

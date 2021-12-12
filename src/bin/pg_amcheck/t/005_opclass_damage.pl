@@ -1,18 +1,22 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # This regression test checks the behavior of the btree validation in the
 # presence of breaking sort order changes.
 #
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 5;
 
-my $node = get_new_node('test');
+my $node = PostgreSQL::Test::Cluster->new('test');
 $node->init;
 $node->start;
 
 # Create a custom operator class and an index which uses it.
-$node->safe_psql('postgres', q(
+$node->safe_psql(
+	'postgres', q(
 	CREATE EXTENSION amcheck;
 
 	CREATE FUNCTION int4_asc_cmp (a int4, b int4) RETURNS int LANGUAGE sql AS $$
@@ -30,13 +34,14 @@ $node->safe_psql('postgres', q(
 
 # We have not yet broken the index, so we should get no corruption
 $node->command_like(
-	[ 'pg_amcheck', '--quiet', '-p', $node->port, 'postgres' ],
+	[ 'pg_amcheck', '-p', $node->port, 'postgres' ],
 	qr/^$/,
 	'pg_amcheck all schemas, tables and indexes reports no corruption');
 
 # Change the operator class to use a function which sorts in a different
 # order to corrupt the btree index
-$node->safe_psql('postgres', q(
+$node->safe_psql(
+	'postgres', q(
 	CREATE FUNCTION int4_desc_cmp (int4, int4) RETURNS int LANGUAGE sql AS $$
 		SELECT CASE WHEN $1 = $2 THEN 0 WHEN $1 > $2 THEN -1 ELSE 1 END; $$;
 	UPDATE pg_catalog.pg_amproc
@@ -48,7 +53,7 @@ $node->safe_psql('postgres', q(
 $node->command_checks_all(
 	[ 'pg_amcheck', '-p', $node->port, 'postgres' ],
 	2,
-	[ qr/item order invariant violated for index "fickleidx"/ ],
-	[ ],
+	[qr/item order invariant violated for index "fickleidx"/],
+	[],
 	'pg_amcheck all schemas, tables and indexes reports fickleidx corruption'
 );

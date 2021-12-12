@@ -92,6 +92,7 @@ num_exp_sqrt|t
 num_exp_sub|t
 num_input_test|f
 num_result|f
+num_typemod_test|f
 nummultirange_test|t
 numrange_test|t
 onek|t
@@ -139,6 +140,7 @@ pg_partitioned_table|t
 pg_policy|t
 pg_proc|t
 pg_publication|t
+pg_publication_namespace|t
 pg_publication_rel|t
 pg_range|t
 pg_replication_origin|t
@@ -183,6 +185,7 @@ sql_parts|f
 sql_sizing|f
 stud_emp|f
 student|f
+tab_core_types|f
 tableam_parted_a_heap2|f
 tableam_parted_b_heap2|f
 tableam_parted_c_heap2|f
@@ -213,6 +216,8 @@ tmp|f
 trigger_parted|t
 trigger_parted_p1|t
 trigger_parted_p1_1|t
+trigger_parted_p2|t
+trigger_parted_p2_2|t
 varchar_tbl|f
 view_base_table|t
 -- restore normal output mode

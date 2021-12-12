@@ -270,7 +270,7 @@
 
    <para>
     The <link linkend="app-pgchecksums"><application>pg_checksums</application></link>
-    application can be used to enable or disable data checksums, as well as 
+    application can be used to enable or disable data checksums, as well as
     verify checksums, on an offline cluster.
    </para>
 
@@ -783,7 +783,7 @@
    <function>issue_xlog_fsync</function> syncs WAL data to disk are counted as
    <literal>wal_write_time</literal> and <literal>wal_sync_time</literal> in
    <xref linkend="pg-stat-wal-view"/>, respectively.
-   <function>XLogWrite</function> is normally called by 
+   <function>XLogWrite</function> is normally called by
    <function>XLogInsertRecord</function> (when there is no space for the new
    record in WAL buffers), <function>XLogFlush</function> and the WAL writer,
    to write WAL buffers to disk and call <function>issue_xlog_fsync</function>.
@@ -797,7 +797,7 @@
    <literal>fsync</literal>, or <literal>fsync_writethrough</literal>,
    the write operation moves WAL buffers to kernel cache and
    <function>issue_xlog_fsync</function> syncs them to disk. Regardless
-   of the setting of <varname>track_wal_io_timing</varname>, the numbers
+   of the setting of <varname>track_wal_io_timing</varname>, the number
    of times <function>XLogWrite</function> writes and
    <function>issue_xlog_fsync</function> syncs WAL data to disk are also
    counted as <literal>wal_write</literal> and <literal>wal_sync</literal>
@@ -836,7 +836,7 @@
    <acronym>WAL</acronym> logs are stored in the directory
    <filename>pg_wal</filename> under the data directory, as a set of
    segment files, normally each 16 MB in size (but the size can be changed
-   by altering the <option>--wal-segsize</option> initdb option).  Each segment is
+   by altering the <option>--wal-segsize</option> <application>initdb</application> option).  Each segment is
    divided into pages, normally 8 kB each (this size can be changed via the
    <option>--with-wal-blocksize</option> configure option).  The log record headers
    are described in <filename>access/xlogrecord.h</filename>; the record

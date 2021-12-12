@@ -25,6 +25,7 @@
 #include "catalog/pg_amop.h"
 #include "commands/vacuum.h"
 #include "nodes/nodeFuncs.h"
+#include "parser/parse_coerce.h"
 #include "storage/bufmgr.h"
 #include "storage/indexfsm.h"
 #include "storage/lmgr.h"
@@ -61,6 +62,7 @@ spghandler(PG_FUNCTION_ARGS)
 	amroutine->amcanparallel = false;
 	amroutine->amcaninclude = true;
 	amroutine->amusemaintenanceworkmem = false;
+	amroutine->amhotblocking = true;
 	amroutine->amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_COND_CLEANUP;
 	amroutine->amkeytype = InvalidOid;
@@ -165,8 +167,8 @@ fillTypeDesc(SpGistTypeDesc *desc, Oid type)
 	typtup = (Form_pg_type) GETSTRUCT(tp);
 	desc->attlen = typtup->typlen;
 	desc->attbyval = typtup->typbyval;
-	desc->attstorage = typtup->typstorage;
 	desc->attalign = typtup->typalign;
+	desc->attstorage = typtup->typstorage;
 	ReleaseSysCache(tp);
 }
 
@@ -218,8 +220,19 @@ spgGetCache(Relation index)
 		 * correctly, so believe leafType if it's given.)
 		 */
 		if (!OidIsValid(cache->config.leafType))
+		{
 			cache->config.leafType =
 				TupleDescAttr(RelationGetDescr(index), spgKeyColumn)->atttypid;
+
+			/*
+			 * If index column type is binary-coercible to atttype (for
+			 * example, it's a domain over atttype), treat it as plain atttype
+			 * to avoid thinking we need to compress.
+			 */
+			if (cache->config.leafType != atttype &&
+				IsBinaryCoercible(cache->config.leafType, atttype))
+				cache->config.leafType = atttype;
+		}
 
 		/* Get the information we need about each relevant datatype */
 		fillTypeDesc(&cache->attType, atttype);
@@ -304,8 +317,8 @@ getSpGistTupleDesc(Relation index, SpGistTypeDesc *keyType)
 		att->attalign = keyType->attalign;
 		att->attstorage = keyType->attstorage;
 		/* We shouldn't need to bother with making these valid: */
-		att->attcollation = InvalidOid;
 		att->attcompression = InvalidCompressionMethod;
+		att->attcollation = InvalidOid;
 		/* In case we changed typlen, we'd better reset following offsets */
 		for (int i = spgFirstIncludeColumn; i < outTupDesc->natts; i++)
 			TupleDescAttr(outTupDesc, i)->attcacheoff = -1;
@@ -677,9 +690,8 @@ SpGistInitPage(Page page, uint16 f)
 {
 	SpGistPageOpaque opaque;
 
-	PageInit(page, BLCKSZ, MAXALIGN(sizeof(SpGistPageOpaqueData)));
+	PageInit(page, BLCKSZ, sizeof(SpGistPageOpaqueData));
 	opaque = SpGistPageGetOpaque(page);
-	memset(opaque, 0, sizeof(SpGistPageOpaqueData));
 	opaque->flags = f;
 	opaque->spgist_page_id = SPGIST_PAGE_ID;
 }
@@ -1241,8 +1253,8 @@ SpGistPageAddNewItem(SpGistState *state, Page page, Item item, Size size,
 					*startOffset = offnum + 1;
 			}
 			else
-				elog(PANIC, "failed to add item of size %u to SPGiST index page",
-					 (int) size);
+				elog(PANIC, "failed to add item of size %zu to SPGiST index page",
+					 size);
 
 			return offnum;
 		}
@@ -1253,8 +1265,8 @@ SpGistPageAddNewItem(SpGistState *state, Page page, Item item, Size size,
 						 InvalidOffsetNumber, false, false);
 
 	if (offnum == InvalidOffsetNumber && !errorOK)
-		elog(ERROR, "failed to add item of size %u to SPGiST index page",
-			 (int) size);
+		elog(ERROR, "failed to add item of size %zu to SPGiST index page",
+			 size);
 
 	return offnum;
 }

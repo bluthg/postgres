@@ -38,9 +38,9 @@
 typedef struct XidCacheStatus
 {
 	/* number of cached subxids, never more than PGPROC_MAX_CACHED_SUBXIDS */
-	uint8	count;
+	uint8		count;
 	/* has PGPROC->subxids overflowed */
-	bool	overflowed;
+	bool		overflowed;
 } XidCacheStatus;
 
 struct XidCache
@@ -64,6 +64,13 @@ struct XidCache
 /* flags reset at EOXact */
 #define		PROC_VACUUM_STATE_MASK \
 	(PROC_IN_VACUUM | PROC_IN_SAFE_IC | PROC_VACUUM_FOR_WRAPAROUND)
+
+/*
+ * Flags that are valid to copy from another proc, the parallel leader
+ * process in practice.  Currently, flags that are set during parallel
+ * vacuum and parallel index creation are allowed.
+ */
+#define		PROC_COPYABLE_FLAGS (PROC_IN_VACUUM | PROC_IN_SAFE_IC)
 
 /*
  * We allow a small number of "weak" relation locks (AccessShareLock,
@@ -145,8 +152,8 @@ struct PGPROC
 								 * else InvalidLocalTransactionId */
 	int			pid;			/* Backend's process ID; 0 if prepared xact */
 
-	int			pgxactoff;		/* offset into various ProcGlobal->arrays
-								 * with data mirrored from this PGPROC */
+	int			pgxactoff;		/* offset into various ProcGlobal->arrays with
+								 * data mirrored from this PGPROC */
 	int			pgprocno;
 
 	/* These fields are zero while a backend is still starting up: */
@@ -207,8 +214,8 @@ struct PGPROC
 	 */
 	SHM_QUEUE	myProcLocks[NUM_LOCK_PARTITIONS];
 
-	XidCacheStatus subxidStatus; /* mirrored with
-								  * ProcGlobal->subxidStates[i] */
+	XidCacheStatus subxidStatus;	/* mirrored with
+									 * ProcGlobal->subxidStates[i] */
 	struct XidCache subxids;	/* cache for subtransaction XIDs */
 
 	/* Support for group XID clearing. */

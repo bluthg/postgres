@@ -74,6 +74,7 @@ hashhandler(PG_FUNCTION_ARGS)
 	amroutine->amcanparallel = false;
 	amroutine->amcaninclude = false;
 	amroutine->amusemaintenanceworkmem = false;
+	amroutine->amhotblocking = true;
 	amroutine->amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_BULKDEL;
 	amroutine->amkeytype = INT4OID;
@@ -816,7 +817,7 @@ hashbucketcleanup(Relation rel, Bucket cur_bucket, Buffer bucket_buf,
 				XLogRecPtr	recptr;
 
 				xlrec.clear_dead_marking = clear_dead_marking;
-				xlrec.is_primary_bucket_page = (buf == bucket_buf) ? true : false;
+				xlrec.is_primary_bucket_page = (buf == bucket_buf);
 
 				XLogBeginInsert();
 				XLogRegisterData((char *) &xlrec, SizeOfHashDelete);

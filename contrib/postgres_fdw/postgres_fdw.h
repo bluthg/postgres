@@ -145,6 +145,7 @@ extern PGconn *GetConnection(UserMapping *user, bool will_prep_stmt,
 extern void ReleaseConnection(PGconn *conn);
 extern unsigned int GetCursorNumber(PGconn *conn);
 extern unsigned int GetPrepStmtNumber(PGconn *conn);
+extern void do_sql_command(PGconn *conn, const char *sql);
 extern PGresult *pgfdw_get_result(PGconn *conn, const char *query);
 extern PGresult *pgfdw_exec_query(PGconn *conn, const char *query,
 								  PgFdwConnState *state);
@@ -157,6 +158,7 @@ extern int	ExtractConnectionOptions(List *defelems,
 									 const char **values);
 extern List *ExtractExtensionList(const char *extensionsString,
 								  bool warnOnMissing);
+extern char *pgfdw_application_name;
 
 /* in deparse.c */
 extern void classifyConditions(PlannerInfo *root,
@@ -175,8 +177,9 @@ extern void deparseInsertSql(StringInfo buf, RangeTblEntry *rte,
 							 List *targetAttrs, bool doNothing,
 							 List *withCheckOptionList, List *returningList,
 							 List **retrieved_attrs, int *values_end_len);
-extern void rebuildInsertSql(StringInfo buf, char *orig_query,
-							 int values_end_len, int num_cols,
+extern void rebuildInsertSql(StringInfo buf, Relation rel,
+							 char *orig_query, List *target_attrs,
+							 int values_end_len, int num_params,
 							 int num_rows);
 extern void deparseUpdateSql(StringInfo buf, RangeTblEntry *rte,
 							 Index rtindex, Relation rel,
@@ -206,6 +209,10 @@ extern void deparseDirectDeleteSql(StringInfo buf, PlannerInfo *root,
 extern void deparseAnalyzeSizeSql(StringInfo buf, Relation rel);
 extern void deparseAnalyzeSql(StringInfo buf, Relation rel,
 							  List **retrieved_attrs);
+extern void deparseTruncateSql(StringInfo buf,
+							   List *rels,
+							   DropBehavior behavior,
+							   bool restart_seqs);
 extern void deparseStringLiteral(StringInfo buf, const char *val);
 extern Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel);
 extern Expr *find_em_expr_for_input_target(PlannerInfo *root,

@@ -110,6 +110,13 @@ log_locus_callback(const char **filename, uint64 *lineno)
 	}
 }
 
+#ifdef HAVE_POSIX_DECL_SIGWAIT
+static void
+empty_signal_handler(SIGNAL_ARGS)
+{
+}
+#endif
+
 /*
  *
  * main
@@ -232,7 +239,8 @@ main(int argc, char *argv[])
 		/*
 		 * We can't be sure yet of the username that will be used, so don't
 		 * offer a potentially wrong one.  Typical uses of this option are
-		 * noninteractive anyway.
+		 * noninteractive anyway.  (Note: since we've not yet set up our
+		 * cancel handler, there's no need to use simple_prompt_extended.)
 		 */
 		password = simple_prompt("Password: ", false);
 	}
@@ -301,6 +309,18 @@ main(int argc, char *argv[])
 	}
 
 	psql_setup_cancel_handler();
+
+#ifdef HAVE_POSIX_DECL_SIGWAIT
+
+	/*
+	 * do_watch() needs signal handlers installed (otherwise sigwait() will
+	 * filter them out on some platforms), but doesn't need them to do
+	 * anything, and they shouldn't ever run (unless perhaps a stray SIGALRM
+	 * arrives due to a race when do_watch() cancels an itimer).
+	 */
+	pqsignal(SIGCHLD, empty_signal_handler);
+	pqsignal(SIGALRM, empty_signal_handler);
+#endif
 
 	PQsetNoticeProcessor(pset.db, NoticeProcessor, NULL);
 

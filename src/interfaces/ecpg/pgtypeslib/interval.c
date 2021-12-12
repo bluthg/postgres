@@ -155,7 +155,7 @@ DecodeISO8601Interval(char *str,
 			{
 				case 'Y':
 					tm->tm_year += val;
-					tm->tm_mon += (fval * MONTHS_PER_YEAR);
+					tm->tm_mon += rint(fval * MONTHS_PER_YEAR);
 					break;
 				case 'M':
 					tm->tm_mon += val;
@@ -191,7 +191,7 @@ DecodeISO8601Interval(char *str,
 						return DTERR_BAD_FORMAT;
 
 					tm->tm_year += val;
-					tm->tm_mon += (fval * MONTHS_PER_YEAR);
+					tm->tm_mon += rint(fval * MONTHS_PER_YEAR);
 					if (unit == '\0')
 						return 0;
 					if (unit == 'T')
@@ -528,29 +528,25 @@ DecodeInterval(char **field, int *ftype, int nf,	/* int range, */
 
 					case DTK_YEAR:
 						tm->tm_year += val;
-						if (fval != 0)
-							tm->tm_mon += fval * MONTHS_PER_YEAR;
+						tm->tm_mon += rint(fval * MONTHS_PER_YEAR);
 						tmask = (fmask & DTK_M(YEAR)) ? 0 : DTK_M(YEAR);
 						break;
 
 					case DTK_DECADE:
 						tm->tm_year += val * 10;
-						if (fval != 0)
-							tm->tm_mon += fval * MONTHS_PER_YEAR * 10;
+						tm->tm_mon += rint(fval * MONTHS_PER_YEAR * 10);
 						tmask = (fmask & DTK_M(YEAR)) ? 0 : DTK_M(YEAR);
 						break;
 
 					case DTK_CENTURY:
 						tm->tm_year += val * 100;
-						if (fval != 0)
-							tm->tm_mon += fval * MONTHS_PER_YEAR * 100;
+						tm->tm_mon += rint(fval * MONTHS_PER_YEAR * 100);
 						tmask = (fmask & DTK_M(YEAR)) ? 0 : DTK_M(YEAR);
 						break;
 
 					case DTK_MILLENNIUM:
 						tm->tm_year += val * 1000;
-						if (fval != 0)
-							tm->tm_mon += fval * MONTHS_PER_YEAR * 1000;
+						tm->tm_mon += rint(fval * MONTHS_PER_YEAR * 1000);
 						tmask = (fmask & DTK_M(YEAR)) ? 0 : DTK_M(YEAR);
 						break;
 
@@ -694,7 +690,7 @@ AddVerboseIntPart(char *cp, int value, const char *units,
 	}
 	else if (*is_before)
 		value = -value;
-	sprintf(cp, " %d %s%s", value, units, (abs(value) == 1) ? "" : "s");
+	sprintf(cp, " %d %s%s", value, units, (value == 1) ? "" : "s");
 	*is_zero = false;
 	return cp + strlen(cp);
 }
@@ -711,7 +707,7 @@ AddPostgresIntPart(char *cp, int value, const char *units,
 			(*is_before && value > 0) ? "+" : "",
 			value,
 			units,
-			(abs(value) != 1) ? "s" : "");
+			(value != 1) ? "s" : "");
 
 	/*
 	 * Each nonzero field sets is_before for (only) the next one.  This is a
@@ -924,6 +920,7 @@ EncodeInterval(struct /* pg_ */ tm *tm, fsec_t fsec, int style, char *str)
 					*cp++ = '-';
 				AppendSeconds(cp, sec, fsec, MAX_INTERVAL_PRECISION, false);
 				cp += strlen(cp);
+				/* We output "ago", not negatives, so use abs(). */
 				sprintf(cp, " sec%s",
 						(abs(sec) != 1 || fsec != 0) ? "s" : "");
 				is_zero = false;

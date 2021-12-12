@@ -282,7 +282,7 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
 		 * Try to find the variable; but do not create a custom placeholder if
 		 * it's not there already.
 		 */
-		record = find_option(item->name, false, elevel);
+		record = find_option(item->name, false, true, elevel);
 
 		if (record)
 		{
@@ -306,12 +306,12 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
 			/* Now mark it as present in file */
 			record->status |= GUC_IS_IN_FILE;
 		}
-		else if (strchr(item->name, GUC_QUALIFIER_SEPARATOR) == NULL)
+		else if (!valid_custom_variable_name(item->name))
 		{
 			/* Invalid non-custom variable, so complain */
 			ereport(elevel,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("unrecognized configuration parameter \"%s\" in file \"%s\" line %u",
+					 errmsg("unrecognized configuration parameter \"%s\" in file \"%s\" line %d",
 							item->name,
 							item->filename, item->sourceline)));
 			item->errmsg = pstrdup("unrecognized configuration parameter");
@@ -346,6 +346,8 @@ ProcessConfigFileInternal(GucContext context, bool applySettings, int elevel)
 			continue;
 		if (gconf->context < PGC_SIGHUP)
 		{
+			/* The removal can't be effective without a restart */
+			gconf->status |= GUC_PENDING_RESTART;
 			ereport(elevel,
 					(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
 					 errmsg("parameter \"%s\" cannot be changed without restarting the server",

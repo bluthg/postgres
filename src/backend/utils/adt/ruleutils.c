@@ -172,6 +172,10 @@ typedef struct
 	List	   *outer_tlist;	/* referent for OUTER_VAR Vars */
 	List	   *inner_tlist;	/* referent for INNER_VAR Vars */
 	List	   *index_tlist;	/* referent for INDEX_VAR Vars */
+	/* Special namespace representing a function signature: */
+	char	   *funcname;
+	int			numargs;
+	char	  **argnames;
 } deparse_namespace;
 
 /*
@@ -348,6 +352,7 @@ static int	print_function_arguments(StringInfo buf, HeapTuple proctup,
 									 bool print_table_args, bool print_defaults);
 static void print_function_rettype(StringInfo buf, HeapTuple proctup);
 static void print_function_trftypes(StringInfo buf, HeapTuple proctup);
+static void print_function_sqlbody(StringInfo buf, HeapTuple proctup);
 static void set_rtable_names(deparse_namespace *dpns, List *parent_namespaces,
 							 Bitmapset *rels_used);
 static void set_deparse_for_query(deparse_namespace *dpns, Query *query,
@@ -370,6 +375,8 @@ static void identify_join_columns(JoinExpr *j, RangeTblEntry *jrte,
 								  deparse_columns *colinfo);
 static char *get_rtable_name(int rtindex, deparse_context *context);
 static void set_deparse_plan(deparse_namespace *dpns, Plan *plan);
+static Plan *find_recursive_union(deparse_namespace *dpns,
+								  WorkTableScan *wtscan);
 static void push_child_plan(deparse_namespace *dpns, Plan *plan,
 							deparse_namespace *save_dpns);
 static void pop_child_plan(deparse_namespace *dpns,
@@ -1612,7 +1619,7 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 
 	if (!columns_only)
 	{
-		nsp = get_namespace_name(statextrec->stxnamespace);
+		nsp = get_namespace_name_or_temp(statextrec->stxnamespace);
 		appendStringInfo(&buf, "CREATE STATISTICS %s",
 						 quote_qualified_identifier(nsp,
 													NameStr(statextrec->stxname)));
@@ -1707,7 +1714,7 @@ pg_get_statisticsobj_worker(Oid statextid, bool columns_only, bool missing_ok)
 	{
 		Node	   *expr = (Node *) lfirst(lc);
 		char	   *str;
-		int			prettyFlags = PRETTYFLAG_INDENT;
+		int			prettyFlags = PRETTYFLAG_PAREN;
 
 		str = deparse_expression_pretty(expr, context, false, false,
 										prettyFlags, 0);
@@ -1754,9 +1761,9 @@ pg_get_statisticsobjdef_expressions(PG_FUNCTION_ARGS)
 	statexttup = SearchSysCache1(STATEXTOID, ObjectIdGetDatum(statextid));
 
 	if (!HeapTupleIsValid(statexttup))
-		elog(ERROR, "cache lookup failed for statistics object %u", statextid);
+		PG_RETURN_NULL();
 
-	/* has the statistics expressions? */
+	/* Does the stats object have expressions? */
 	has_exprs = !heap_attisnull(statexttup, Anum_pg_statistic_ext_stxexprs, NULL);
 
 	/* no expressions? we're done */
@@ -2279,6 +2286,16 @@ pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
 				}
 				if (string)
 					appendStringInfo(&buf, " ON DELETE %s", string);
+
+				/* Add columns specified to SET NULL or SET DEFAULT if provided. */
+				val = SysCacheGetAttr(CONSTROID, tup,
+									  Anum_pg_constraint_confdelsetcols, &isnull);
+				if (!isnull)
+				{
+					appendStringInfo(&buf, " (");
+					decompile_column_index_array(val, conForm->conrelid, &buf);
+					appendStringInfo(&buf, ")");
+				}
 
 				break;
 			}
@@ -2806,7 +2823,7 @@ pg_get_functiondef(PG_FUNCTION_ARGS)
 	 * We always qualify the function name, to ensure the right function gets
 	 * replaced.
 	 */
-	nsp = get_namespace_name(proc->pronamespace);
+	nsp = get_namespace_name_or_temp(proc->pronamespace);
 	appendStringInfo(&buf, "CREATE OR REPLACE %s %s(",
 					 isfunction ? "FUNCTION" : "PROCEDURE",
 					 quote_qualified_identifier(nsp, name));
@@ -2968,37 +2985,46 @@ pg_get_functiondef(PG_FUNCTION_ARGS)
 	}
 
 	/* And finally the function definition ... */
-	appendStringInfoString(&buf, "AS ");
-
-	tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_probin, &isnull);
-	if (!isnull)
+	(void) SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosqlbody, &isnull);
+	if (proc->prolang == SQLlanguageId && !isnull)
 	{
-		simple_quote_literal(&buf, TextDatumGetCString(tmp));
-		appendStringInfoString(&buf, ", "); /* assume prosrc isn't null */
+		print_function_sqlbody(&buf, proctup);
 	}
+	else
+	{
+		appendStringInfoString(&buf, "AS ");
 
-	tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosrc, &isnull);
-	if (isnull)
-		elog(ERROR, "null prosrc");
-	prosrc = TextDatumGetCString(tmp);
+		tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_probin, &isnull);
+		if (!isnull)
+		{
+			simple_quote_literal(&buf, TextDatumGetCString(tmp));
+			appendStringInfoString(&buf, ", "); /* assume prosrc isn't null */
+		}
 
-	/*
-	 * We always use dollar quoting.  Figure out a suitable delimiter.
-	 *
-	 * Since the user is likely to be editing the function body string, we
-	 * shouldn't use a short delimiter that he might easily create a conflict
-	 * with.  Hence prefer "$function$"/"$procedure$", but extend if needed.
-	 */
-	initStringInfo(&dq);
-	appendStringInfoChar(&dq, '$');
-	appendStringInfoString(&dq, (isfunction ? "function" : "procedure"));
-	while (strstr(prosrc, dq.data) != NULL)
-		appendStringInfoChar(&dq, 'x');
-	appendStringInfoChar(&dq, '$');
+		tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosrc, &isnull);
+		if (isnull)
+			elog(ERROR, "null prosrc");
+		prosrc = TextDatumGetCString(tmp);
 
-	appendBinaryStringInfo(&buf, dq.data, dq.len);
-	appendStringInfoString(&buf, prosrc);
-	appendBinaryStringInfo(&buf, dq.data, dq.len);
+		/*
+		 * We always use dollar quoting.  Figure out a suitable delimiter.
+		 *
+		 * Since the user is likely to be editing the function body string, we
+		 * shouldn't use a short delimiter that he might easily create a
+		 * conflict with.  Hence prefer "$function$"/"$procedure$", but extend
+		 * if needed.
+		 */
+		initStringInfo(&dq);
+		appendStringInfoChar(&dq, '$');
+		appendStringInfoString(&dq, (isfunction ? "function" : "procedure"));
+		while (strstr(prosrc, dq.data) != NULL)
+			appendStringInfoChar(&dq, 'x');
+		appendStringInfoChar(&dq, '$');
+
+		appendBinaryStringInfo(&buf, dq.data, dq.len);
+		appendStringInfoString(&buf, prosrc);
+		appendBinaryStringInfo(&buf, dq.data, dq.len);
+	}
 
 	appendStringInfoChar(&buf, '\n');
 
@@ -3203,7 +3229,15 @@ print_function_arguments(StringInfo buf, HeapTuple proctup,
 		switch (argmode)
 		{
 			case PROARGMODE_IN:
-				modename = "";
+
+				/*
+				 * For procedures, explicitly mark all argument modes, so as
+				 * to avoid ambiguity with the SQL syntax for DROP PROCEDURE.
+				 */
+				if (proc->prokind == PROKIND_PROCEDURE)
+					modename = "IN ";
+				else
+					modename = "";
 				isinput = true;
 				break;
 			case PROARGMODE_INOUT:
@@ -3380,6 +3414,91 @@ pg_get_function_arg_default(PG_FUNCTION_ARGS)
 	ReleaseSysCache(proctup);
 
 	PG_RETURN_TEXT_P(string_to_text(str));
+}
+
+static void
+print_function_sqlbody(StringInfo buf, HeapTuple proctup)
+{
+	int			numargs;
+	Oid		   *argtypes;
+	char	  **argnames;
+	char	   *argmodes;
+	deparse_namespace dpns = {0};
+	Datum		tmp;
+	bool		isnull;
+	Node	   *n;
+
+	dpns.funcname = pstrdup(NameStr(((Form_pg_proc) GETSTRUCT(proctup))->proname));
+	numargs = get_func_arg_info(proctup,
+								&argtypes, &argnames, &argmodes);
+	dpns.numargs = numargs;
+	dpns.argnames = argnames;
+
+	tmp = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosqlbody, &isnull);
+	Assert(!isnull);
+	n = stringToNode(TextDatumGetCString(tmp));
+
+	if (IsA(n, List))
+	{
+		List	   *stmts;
+		ListCell   *lc;
+
+		stmts = linitial(castNode(List, n));
+
+		appendStringInfoString(buf, "BEGIN ATOMIC\n");
+
+		foreach(lc, stmts)
+		{
+			Query	   *query = lfirst_node(Query, lc);
+
+			/* It seems advisable to get at least AccessShareLock on rels */
+			AcquireRewriteLocks(query, false, false);
+			get_query_def(query, buf, list_make1(&dpns), NULL,
+						  PRETTYFLAG_INDENT, WRAP_COLUMN_DEFAULT, 1);
+			appendStringInfoChar(buf, ';');
+			appendStringInfoChar(buf, '\n');
+		}
+
+		appendStringInfoString(buf, "END");
+	}
+	else
+	{
+		Query	   *query = castNode(Query, n);
+
+		/* It seems advisable to get at least AccessShareLock on rels */
+		AcquireRewriteLocks(query, false, false);
+		get_query_def(query, buf, list_make1(&dpns), NULL,
+					  0, WRAP_COLUMN_DEFAULT, 0);
+	}
+}
+
+Datum
+pg_get_function_sqlbody(PG_FUNCTION_ARGS)
+{
+	Oid			funcid = PG_GETARG_OID(0);
+	StringInfoData buf;
+	HeapTuple	proctup;
+	bool		isnull;
+
+	initStringInfo(&buf);
+
+	/* Look up the function */
+	proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(proctup))
+		PG_RETURN_NULL();
+
+	(void) SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosqlbody, &isnull);
+	if (isnull)
+	{
+		ReleaseSysCache(proctup);
+		PG_RETURN_NULL();
+	}
+
+	print_function_sqlbody(&buf, proctup);
+
+	ReleaseSysCache(proctup);
+
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }
 
 
@@ -3572,8 +3691,8 @@ set_deparse_context_plan(List *dpcontext, Plan *plan, List *ancestors)
 	dpns = (deparse_namespace *) linitial(dpcontext);
 
 	/* Set our attention on the specific plan node passed in */
-	set_deparse_plan(dpns, plan);
 	dpns->ancestors = ancestors;
+	set_deparse_plan(dpns, plan);
 
 	return dpcontext;
 }
@@ -4727,7 +4846,7 @@ get_rtable_name(int rtindex, deparse_context *context)
  * of a given Plan node
  *
  * This sets the plan, outer_plan, inner_plan, outer_tlist, inner_tlist,
- * and index_tlist fields.  Caller is responsible for adjusting the ancestors
+ * and index_tlist fields.  Caller must already have adjusted the ancestors
  * list if necessary.  Note that the rtable, subplans, and ctes fields do
  * not need to change when shifting attention to different plan nodes in a
  * single plan tree.
@@ -4759,6 +4878,9 @@ set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 	 * For a SubqueryScan, pretend the subplan is INNER referent.  (We don't
 	 * use OUTER because that could someday conflict with the normal meaning.)
 	 * Likewise, for a CteScan, pretend the subquery's plan is INNER referent.
+	 * For a WorkTableScan, locate the parent RecursiveUnion plan node and use
+	 * that as INNER referent.
+	 *
 	 * For ON CONFLICT .. UPDATE we just need the inner tlist to point to the
 	 * excluded expression's tlist. (Similar to the SubqueryScan we don't want
 	 * to reuse OUTER, it's used for RETURNING in some modify table cases,
@@ -4769,6 +4891,9 @@ set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 	else if (IsA(plan, CteScan))
 		dpns->inner_plan = list_nth(dpns->subplans,
 									((CteScan *) plan)->ctePlanId - 1);
+	else if (IsA(plan, WorkTableScan))
+		dpns->inner_plan = find_recursive_union(dpns,
+												(WorkTableScan *) plan);
 	else if (IsA(plan, ModifyTable))
 		dpns->inner_plan = plan;
 	else
@@ -4790,6 +4915,29 @@ set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 		dpns->index_tlist = ((CustomScan *) plan)->custom_scan_tlist;
 	else
 		dpns->index_tlist = NIL;
+}
+
+/*
+ * Locate the ancestor plan node that is the RecursiveUnion generating
+ * the WorkTableScan's work table.  We can match on wtParam, since that
+ * should be unique within the plan tree.
+ */
+static Plan *
+find_recursive_union(deparse_namespace *dpns, WorkTableScan *wtscan)
+{
+	ListCell   *lc;
+
+	foreach(lc, dpns->ancestors)
+	{
+		Plan	   *ancestor = (Plan *) lfirst(lc);
+
+		if (IsA(ancestor, RecursiveUnion) &&
+			((RecursiveUnion *) ancestor)->wtParam == wtscan->wtParam)
+			return ancestor;
+	}
+	elog(ERROR, "could not find RecursiveUnion for WorkTableScan with wtParam %d",
+		 wtscan->wtParam);
+	return NULL;
 }
 
 /*
@@ -5637,7 +5785,10 @@ get_basic_select_query(Query *query, deparse_context *context,
 	/*
 	 * Build up the query string - first we say SELECT
 	 */
-	appendStringInfoString(buf, "SELECT");
+	if (query->isReturn)
+		appendStringInfoString(buf, "RETURN");
+	else
+		appendStringInfoString(buf, "SELECT");
 
 	/* Add the DISTINCT clause if given */
 	if (query->distinctClause != NIL)
@@ -6425,7 +6576,7 @@ get_insert_query_def(Query *query, deparse_context *context)
 	if (select_rte)
 	{
 		/* Add the SELECT */
-		get_query_def(select_rte->subquery, buf, NIL, NULL,
+		get_query_def(select_rte->subquery, buf, context->namespaces, NULL,
 					  context->prettyFlags, context->wrapColumn,
 					  context->indentLevel);
 	}
@@ -6839,7 +6990,7 @@ get_variable(Var *var, int levelsup, bool istoplevel, deparse_context *context)
 	AttrNumber	attnum;
 	int			netlevelsup;
 	deparse_namespace *dpns;
-	Index		varno;
+	int			varno;
 	AttrNumber	varattno;
 	deparse_columns *colinfo;
 	char	   *refname;
@@ -6885,7 +7036,7 @@ get_variable(Var *var, int levelsup, bool istoplevel, deparse_context *context)
 		 */
 		if (context->appendparents && dpns->appendrels)
 		{
-			Index		pvarno = varno;
+			int			pvarno = varno;
 			AttrNumber	pvarattno = varattno;
 			AppendRelInfo *appinfo = dpns->appendrels[pvarno];
 			bool		found = false;
@@ -7195,7 +7346,7 @@ get_name_for_var_field(Var *var, int fieldno,
 	AttrNumber	attnum;
 	int			netlevelsup;
 	deparse_namespace *dpns;
-	Index		varno;
+	int			varno;
 	AttrNumber	varattno;
 	TupleDesc	tupleDesc;
 	Node	   *expr;
@@ -7536,9 +7687,12 @@ get_name_for_var_field(Var *var, int fieldno,
 				{
 					/*
 					 * We're deparsing a Plan tree so we don't have a CTE
-					 * list.  But the only place we'd see a Var directly
-					 * referencing a CTE RTE is in a CteScan plan node, and we
-					 * can look into the subplan's tlist instead.
+					 * list.  But the only places we'd see a Var directly
+					 * referencing a CTE RTE are in CteScan or WorkTableScan
+					 * plan nodes.  For those cases, set_deparse_plan arranged
+					 * for dpns->inner_plan to be the plan node that emits the
+					 * CTE or RecursiveUnion result, and we can look at its
+					 * tlist instead.
 					 */
 					TargetEntry *tle;
 					deparse_namespace save_dpns;
@@ -7691,7 +7845,7 @@ find_param_referent(Param *param, deparse_context *context,
 			 */
 			foreach(lc2, ((Plan *) ancestor)->initPlan)
 			{
-				SubPlan    *subplan = castNode(SubPlan, lfirst(lc2));
+				SubPlan    *subplan = lfirst_node(SubPlan, lc2);
 
 				if (child_plan != (Plan *) list_nth(dpns->subplans,
 													subplan->plan_id - 1))
@@ -7769,6 +7923,52 @@ get_parameter(Param *param, deparse_context *context)
 		pop_ancestor_plan(dpns, &save_dpns);
 
 		return;
+	}
+
+	/*
+	 * If it's an external parameter, see if the outermost namespace provides
+	 * function argument names.
+	 */
+	if (param->paramkind == PARAM_EXTERN && context->namespaces != NIL)
+	{
+		dpns = llast(context->namespaces);
+		if (dpns->argnames &&
+			param->paramid > 0 &&
+			param->paramid <= dpns->numargs)
+		{
+			char	   *argname = dpns->argnames[param->paramid - 1];
+
+			if (argname)
+			{
+				bool		should_qualify = false;
+				ListCell   *lc;
+
+				/*
+				 * Qualify the parameter name if there are any other deparse
+				 * namespaces with range tables.  This avoids qualifying in
+				 * trivial cases like "RETURN a + b", but makes it safe in all
+				 * other cases.
+				 */
+				foreach(lc, context->namespaces)
+				{
+					deparse_namespace *dpns = lfirst(lc);
+
+					if (list_length(dpns->rtable_names) > 0)
+					{
+						should_qualify = true;
+						break;
+					}
+				}
+				if (should_qualify)
+				{
+					appendStringInfoString(context->buf, quote_identifier(dpns->funcname));
+					appendStringInfoChar(context->buf, '.');
+				}
+
+				appendStringInfoString(context->buf, quote_identifier(argname));
+				return;
+			}
+		}
 	}
 
 	/*
@@ -7851,14 +8051,14 @@ isSimpleNode(Node *node, Node *parentNode, int prettyFlags)
 			 * appears simple since . has top precedence, unless parent is
 			 * T_FieldSelect itself!
 			 */
-			return (IsA(parentNode, FieldSelect) ? false : true);
+			return !IsA(parentNode, FieldSelect);
 
 		case T_FieldStore:
 
 			/*
 			 * treat like FieldSelect (probably doesn't matter)
 			 */
-			return (IsA(parentNode, FieldStore) ? false : true);
+			return !IsA(parentNode, FieldStore);
 
 		case T_CoerceToDomain:
 			/* maybe simple, check args */
@@ -9261,7 +9461,7 @@ get_rule_expr(Node *node, deparse_context *context,
 						sep = "";
 						foreach(cell, spec->listdatums)
 						{
-							Const	   *val = castNode(Const, lfirst(cell));
+							Const	   *val = lfirst_node(Const, cell);
 
 							appendStringInfoString(buf, sep);
 							get_const_expr(val, context, -1);
@@ -10360,7 +10560,7 @@ get_tablefunc(TableFunc *tf, deparse_context *context, bool showimplicit)
 		forboth(lc1, tf->ns_uris, lc2, tf->ns_names)
 		{
 			Node	   *expr = (Node *) lfirst(lc1);
-			Value	   *ns_node = (Value *) lfirst(lc2);
+			String	   *ns_node = lfirst_node(String, lc2);
 
 			if (!first)
 				appendStringInfoString(buf, ", ");
@@ -11037,7 +11237,7 @@ get_opclass_name(Oid opclass, Oid actual_datatype,
 			appendStringInfo(buf, " %s", quote_identifier(opcname));
 		else
 		{
-			nspname = get_namespace_name(opcrec->opcnamespace);
+			nspname = get_namespace_name_or_temp(opcrec->opcnamespace);
 			appendStringInfo(buf, " %s.%s",
 							 quote_identifier(nspname),
 							 quote_identifier(opcname));
@@ -11349,7 +11549,7 @@ generate_relation_name(Oid relid, List *namespaces)
 		need_qual = !RelationIsVisible(relid);
 
 	if (need_qual)
-		nspname = get_namespace_name(reltup->relnamespace);
+		nspname = get_namespace_name_or_temp(reltup->relnamespace);
 	else
 		nspname = NULL;
 
@@ -11381,7 +11581,7 @@ generate_qualified_relation_name(Oid relid)
 	reltup = (Form_pg_class) GETSTRUCT(tp);
 	relname = NameStr(reltup->relname);
 
-	nspname = get_namespace_name(reltup->relnamespace);
+	nspname = get_namespace_name_or_temp(reltup->relnamespace);
 	if (!nspname)
 		elog(ERROR, "cache lookup failed for namespace %u",
 			 reltup->relnamespace);
@@ -11477,7 +11677,7 @@ generate_function_name(Oid funcid, int nargs, List *argnames, Oid *argtypes,
 	if (!force_qualify)
 		p_result = func_get_detail(list_make1(makeString(proname)),
 								   NIL, argnames, nargs, argtypes,
-								   !use_variadic, true,
+								   !use_variadic, true, false,
 								   &p_funcid, &p_rettype,
 								   &p_retset, &p_nvargs, &p_vatype,
 								   &p_true_typeids, NULL);
@@ -11493,7 +11693,7 @@ generate_function_name(Oid funcid, int nargs, List *argnames, Oid *argtypes,
 		p_funcid == funcid)
 		nspname = NULL;
 	else
-		nspname = get_namespace_name(procform->pronamespace);
+		nspname = get_namespace_name_or_temp(procform->pronamespace);
 
 	result = quote_qualified_identifier(nspname, proname);
 
@@ -11556,7 +11756,7 @@ generate_operator_name(Oid operid, Oid arg1, Oid arg2)
 		nspname = NULL;
 	else
 	{
-		nspname = get_namespace_name(operform->oprnamespace);
+		nspname = get_namespace_name_or_temp(operform->oprnamespace);
 		appendStringInfo(&buf, "OPERATOR(%s.", quote_identifier(nspname));
 	}
 
@@ -11644,7 +11844,7 @@ add_cast_to(StringInfo buf, Oid typid)
 	typform = (Form_pg_type) GETSTRUCT(typetup);
 
 	typname = NameStr(typform->typname);
-	nspname = get_namespace_name(typform->typnamespace);
+	nspname = get_namespace_name_or_temp(typform->typnamespace);
 
 	appendStringInfo(buf, "::%s.%s",
 					 quote_identifier(nspname), quote_identifier(typname));
@@ -11676,7 +11876,7 @@ generate_qualified_type_name(Oid typid)
 	typtup = (Form_pg_type) GETSTRUCT(tp);
 	typname = NameStr(typtup->typname);
 
-	nspname = get_namespace_name(typtup->typnamespace);
+	nspname = get_namespace_name_or_temp(typtup->typnamespace);
 	if (!nspname)
 		elog(ERROR, "cache lookup failed for namespace %u",
 			 typtup->typnamespace);
@@ -11710,7 +11910,7 @@ generate_collation_name(Oid collid)
 	collname = NameStr(colltup->collname);
 
 	if (!CollationIsVisible(collid))
-		nspname = get_namespace_name(colltup->collnamespace);
+		nspname = get_namespace_name_or_temp(colltup->collnamespace);
 	else
 		nspname = NULL;
 
@@ -11844,7 +12044,7 @@ get_range_partbound_string(List *bound_datums)
 	foreach(cell, bound_datums)
 	{
 		PartitionRangeDatum *datum =
-		castNode(PartitionRangeDatum, lfirst(cell));
+		lfirst_node(PartitionRangeDatum, cell);
 
 		appendStringInfoString(buf, sep);
 		if (datum->kind == PARTITION_RANGE_DATUM_MINVALUE)

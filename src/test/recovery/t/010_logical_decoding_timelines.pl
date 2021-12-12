@@ -1,3 +1,6 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # Demonstrate that logical can follow timeline switches.
 #
 # Logical replication slots can follow timeline switches but it's
@@ -21,8 +24,8 @@
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 use Test::More tests => 13;
 use File::Copy;
 use IPC::Run ();
@@ -31,7 +34,7 @@ use Scalar::Util qw(blessed);
 my ($stdout, $stderr, $ret);
 
 # Initialize primary node
-my $node_primary = get_new_node('primary');
+my $node_primary = PostgreSQL::Test::Cluster->new('primary');
 $node_primary->init(allows_streaming => 1, has_archiving => 1);
 $node_primary->append_conf(
 	'postgresql.conf', q[
@@ -71,7 +74,7 @@ $node_primary->backup_fs_hot($backup_name);
 $node_primary->safe_psql('postgres',
 	q[SELECT pg_create_physical_replication_slot('phys_slot');]);
 
-my $node_replica = get_new_node('replica');
+my $node_replica = PostgreSQL::Test::Cluster->new('replica');
 $node_replica->init_from_backup(
 	$node_primary, $backup_name,
 	has_streaming => 1,
@@ -155,7 +158,7 @@ like(
 ($ret, $stdout, $stderr) = $node_replica->psql(
 	'postgres',
 	"SELECT data FROM pg_logical_slot_peek_changes('before_basebackup', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');",
-	timeout => 30);
+	timeout => 180);
 is($ret, 0, 'replay from slot before_basebackup succeeds');
 
 my $final_expected_output_bb = q(BEGIN

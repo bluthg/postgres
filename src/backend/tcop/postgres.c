@@ -42,6 +42,7 @@
 #include "catalog/pg_type.h"
 #include "commands/async.h"
 #include "commands/prepare.h"
+#include "common/pg_prng.h"
 #include "executor/spi.h"
 #include "jit/jit.h"
 #include "libpq/libpq.h"
@@ -191,7 +192,6 @@ static int	interactive_getc(void);
 static int	SocketBackend(StringInfo inBuf);
 static int	ReadCommand(StringInfo inBuf);
 static void forbidden_in_wal_sender(char firstchar);
-static List *pg_rewrite_query(Query *query);
 static bool check_log_statement(List *stmt_list);
 static int	errdetail_execute(List *raw_parsetree_list);
 static int	errdetail_params(ParamListInfo params);
@@ -344,6 +344,7 @@ static int
 SocketBackend(StringInfo inBuf)
 {
 	int			qtype;
+	int			maxmsglen;
 
 	/*
 	 * Get message type code from the frontend.
@@ -376,7 +377,9 @@ SocketBackend(StringInfo inBuf)
 	/*
 	 * Validate message type code before trying to read body; if we have lost
 	 * sync, better to say "command unknown" than to run out of memory because
-	 * we used garbage as a length word.
+	 * we used garbage as a length word.  We can also select a type-dependent
+	 * limit on what a sane length word could be.  (The limit could be chosen
+	 * more granularly, but it's not clear it's worth fussing over.)
 	 *
 	 * This also gives us a place to set the doing_extended_query_message flag
 	 * as soon as possible.
@@ -384,28 +387,37 @@ SocketBackend(StringInfo inBuf)
 	switch (qtype)
 	{
 		case 'Q':				/* simple query */
+			maxmsglen = PQ_LARGE_MESSAGE_LIMIT;
 			doing_extended_query_message = false;
 			break;
 
 		case 'F':				/* fastpath function call */
+			maxmsglen = PQ_LARGE_MESSAGE_LIMIT;
 			doing_extended_query_message = false;
 			break;
 
 		case 'X':				/* terminate */
+			maxmsglen = PQ_SMALL_MESSAGE_LIMIT;
 			doing_extended_query_message = false;
 			ignore_till_sync = false;
 			break;
 
 		case 'B':				/* bind */
+		case 'P':				/* parse */
+			maxmsglen = PQ_LARGE_MESSAGE_LIMIT;
+			doing_extended_query_message = true;
+			break;
+
 		case 'C':				/* close */
 		case 'D':				/* describe */
 		case 'E':				/* execute */
 		case 'H':				/* flush */
-		case 'P':				/* parse */
+			maxmsglen = PQ_SMALL_MESSAGE_LIMIT;
 			doing_extended_query_message = true;
 			break;
 
 		case 'S':				/* sync */
+			maxmsglen = PQ_SMALL_MESSAGE_LIMIT;
 			/* stop any active skip-till-Sync */
 			ignore_till_sync = false;
 			/* mark not-extended, so that a new error doesn't begin skip */
@@ -413,8 +425,13 @@ SocketBackend(StringInfo inBuf)
 			break;
 
 		case 'd':				/* copy data */
+			maxmsglen = PQ_LARGE_MESSAGE_LIMIT;
+			doing_extended_query_message = false;
+			break;
+
 		case 'c':				/* copy done */
 		case 'f':				/* copy fail */
+			maxmsglen = PQ_SMALL_MESSAGE_LIMIT;
 			doing_extended_query_message = false;
 			break;
 
@@ -428,6 +445,7 @@ SocketBackend(StringInfo inBuf)
 			ereport(FATAL,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("invalid frontend message type %d", qtype)));
+			maxmsglen = 0;		/* keep compiler quiet */
 			break;
 	}
 
@@ -436,8 +454,8 @@ SocketBackend(StringInfo inBuf)
 	 * after the type code; we can read the message contents independently of
 	 * the type.
 	 */
-	if (pq_getmessage(inBuf, 0))
-		return EOF;			/* suitable message already logged */
+	if (pq_getmessage(inBuf, maxmsglen))
+		return EOF;				/* suitable message already logged */
 	RESUME_CANCEL_INTERRUPTS();
 
 	return qtype;
@@ -487,7 +505,7 @@ ProcessClientReadInterrupt(bool blocked)
 
 		/* Process notify interrupts, if any */
 		if (notifyInterruptPending)
-			ProcessNotifyInterrupt();
+			ProcessNotifyInterrupt(true);
 	}
 	else if (ProcDiePending)
 	{
@@ -537,7 +555,7 @@ ProcessClientWriteInterrupt(bool blocked)
 		{
 			/*
 			 * Don't mess with whereToSendOutput if ProcessInterrupts wouldn't
-			 * do anything.
+			 * service ProcDiePending.
 			 */
 			if (InterruptHoldoffCount == 0 && CritSectionCount == 0)
 			{
@@ -668,6 +686,7 @@ pg_analyze_and_rewrite_params(RawStmt *parsetree,
 	ParseState *pstate;
 	Query	   *query;
 	List	   *querytree_list;
+	JumbleState *jstate = NULL;
 
 	Assert(query_string != NULL);	/* required as of 8.4 */
 
@@ -686,10 +705,15 @@ pg_analyze_and_rewrite_params(RawStmt *parsetree,
 
 	query = transformTopLevelStmt(pstate, parsetree);
 
+	if (IsQueryIdEnabled())
+		jstate = JumbleQuery(query, query_string);
+
 	if (post_parse_analyze_hook)
-		(*post_parse_analyze_hook) (pstate, query);
+		(*post_parse_analyze_hook) (pstate, query, jstate);
 
 	free_parsestate(pstate);
+
+	pgstat_report_query_id(query->queryId, false);
 
 	if (log_parser_stats)
 		ShowUsage("PARSE ANALYSIS STATISTICS");
@@ -710,7 +734,7 @@ pg_analyze_and_rewrite_params(RawStmt *parsetree,
  * Note: query must just have come from the parser, because we do not do
  * AcquireRewriteLocks() on it.
  */
-static List *
+List *
 pg_rewrite_query(Query *query)
 {
 	List	   *querytree_list;
@@ -762,7 +786,7 @@ pg_rewrite_query(Query *query)
 		 */
 		foreach(lc, querytree_list)
 		{
-			Query	   *query = castNode(Query, lfirst(lc));
+			Query	   *query = lfirst_node(Query, lc);
 
 			if (query->commandType != CMD_UTILITY)
 			{
@@ -909,6 +933,7 @@ pg_plan_queries(List *querytrees, const char *query_string, int cursorOptions,
 			stmt->utilityStmt = query->utilityStmt;
 			stmt->stmt_location = query->stmt_location;
 			stmt->stmt_len = query->stmt_len;
+			stmt->queryId = query->queryId;
 		}
 		else
 		{
@@ -1024,6 +1049,8 @@ exec_simple_query(const char *query_string)
 		Portal		portal;
 		DestReceiver *receiver;
 		int16		format;
+
+		pgstat_report_query_id(0, true);
 
 		/*
 		 * Get the command name for use in status display (it also becomes the
@@ -1324,8 +1351,8 @@ exec_parse_message(const char *query_string,	/* string to execute */
 
 	ereport(DEBUG2,
 			(errmsg_internal("parse %s: %s",
-					*stmt_name ? stmt_name : "<unnamed>",
-					query_string)));
+							 *stmt_name ? stmt_name : "<unnamed>",
+							 query_string)));
 
 	/*
 	 * Start up a transaction command so we can run parse analysis etc. (Note
@@ -1580,8 +1607,8 @@ exec_bind_message(StringInfo input_message)
 
 	ereport(DEBUG2,
 			(errmsg_internal("bind %s to %s",
-					*portal_name ? portal_name : "<unnamed>",
-					*stmt_name ? stmt_name : "<unnamed>")));
+							 *portal_name ? portal_name : "<unnamed>",
+							 *stmt_name ? stmt_name : "<unnamed>")));
 
 	/* Find prepared statement */
 	if (stmt_name[0] != '\0')
@@ -2329,13 +2356,13 @@ check_log_duration(char *msec_str, bool was_logged)
 
 		/*
 		 * Do not log if log_statement_sample_rate = 0. Log a sample if
-		 * log_statement_sample_rate <= 1 and avoid unnecessary random() call
-		 * if log_statement_sample_rate = 1.
+		 * log_statement_sample_rate <= 1 and avoid unnecessary PRNG call if
+		 * log_statement_sample_rate = 1.
 		 */
 		if (exceeded_sample_duration)
 			in_sample = log_statement_sample_rate != 0 &&
 				(log_statement_sample_rate == 1 ||
-				 random() <= log_statement_sample_rate * MAX_RANDOM_VALUE);
+				 pg_prng_double(&pg_global_prng_state) <= log_statement_sample_rate);
 
 		if (exceeded_duration || in_sample || log_duration || xact_is_sampled)
 		{
@@ -3092,6 +3119,12 @@ RecoveryConflictInterrupt(ProcSignalReason reason)
  * If an interrupt condition is pending, and it's safe to service it,
  * then clear the flag and accept the interrupt.  Called only when
  * InterruptPending is true.
+ *
+ * Note: if INTERRUPTS_CAN_BE_PROCESSED() is true, then ProcessInterrupts
+ * is guaranteed to clear the InterruptPending flag before returning.
+ * (This is not the same as guaranteeing that it's still clear when we
+ * return; another interrupt could have arrived.  But we promise that
+ * any pre-existing one will have been serviced.)
  */
 void
 ProcessInterrupts(void)
@@ -3222,7 +3255,11 @@ ProcessInterrupts(void)
 	{
 		/*
 		 * Re-arm InterruptPending so that we process the cancel request as
-		 * soon as we're done reading the message.
+		 * soon as we're done reading the message.  (XXX this is seriously
+		 * ugly: it complicates INTERRUPTS_CAN_BE_PROCESSED(), and it means we
+		 * can't use that macro directly as the initial test in this function,
+		 * meaning that this code also creates opportunities for other bugs to
+		 * appear.)
 		 */
 		InterruptPending = true;
 	}
@@ -3618,7 +3655,7 @@ get_stats_option_name(const char *arg)
 
 /* ----------------------------------------------------------------
  * process_postgres_switches
- *	   Parse command line arguments for PostgresMain
+ *	   Parse command line arguments for backends
  *
  * This is called twice, once for the "secure" options coming from the
  * postmaster or command line, and once for the "insecure" options coming
@@ -3879,40 +3916,30 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 }
 
 
-/* ----------------------------------------------------------------
- * PostgresMain
- *	   postgres main loop -- all backends, interactive or otherwise start here
+/*
+ * PostgresSingleUserMain
+ *     Entry point for single user mode. argc/argv are the command line
+ *     arguments to be used.
  *
- * argc/argv are the command line arguments to be used.  (When being forked
- * by the postmaster, these are not the original argv array of the process.)
- * dbname is the name of the database to connect to, or NULL if the database
- * name should be extracted from the command line arguments or defaulted.
- * username is the PostgreSQL user name to be used for the session.
- * ----------------------------------------------------------------
+ * Performs single user specific setup then calls PostgresMain() to actually
+ * process queries. Single user mode specific setup should go here, rather
+ * than PostgresMain() or InitPostgres() when reasonably possible.
  */
 void
-PostgresMain(int argc, char *argv[],
-			 const char *dbname,
-			 const char *username)
+PostgresSingleUserMain(int argc, char *argv[],
+					   const char *username)
 {
-	int			firstchar;
-	StringInfoData input_message;
-	sigjmp_buf	local_sigjmp_buf;
-	volatile bool send_ready_for_query = true;
-	bool		idle_in_transaction_timeout_enabled = false;
-	bool		idle_session_timeout_enabled = false;
+	const char *dbname = NULL;
 
-	/* Initialize startup process environment if necessary. */
-	if (!IsUnderPostmaster)
-		InitStandaloneProcess(argv[0]);
+	Assert(!IsUnderPostmaster);
 
-	SetProcessingMode(InitProcessing);
+	/* Initialize startup process environment. */
+	InitStandaloneProcess(argv[0]);
 
 	/*
 	 * Set default values for command-line options.
 	 */
-	if (!IsUnderPostmaster)
-		InitializeGUCOptions();
+	InitializeGUCOptions();
 
 	/*
 	 * Parse command-line options.
@@ -3930,12 +3957,75 @@ PostgresMain(int argc, char *argv[],
 							progname)));
 	}
 
-	/* Acquire configuration parameters, unless inherited from postmaster */
-	if (!IsUnderPostmaster)
-	{
-		if (!SelectConfigFiles(userDoption, progname))
-			proc_exit(1);
-	}
+	/* Acquire configuration parameters */
+	if (!SelectConfigFiles(userDoption, progname))
+		proc_exit(1);
+
+	/*
+	 * Validate we have been given a reasonable-looking DataDir and change
+	 * into it.
+	 */
+	checkDataDir();
+	ChangeToDataDir();
+
+	/*
+	 * Create lockfile for data directory.
+	 */
+	CreateDataDirLockFile(false);
+
+	/* read control file (error checking and contains config ) */
+	LocalProcessControlFile(false);
+
+	/* Initialize MaxBackends */
+	InitializeMaxBackends();
+
+	CreateSharedMemoryAndSemaphores();
+
+	/*
+	 * Remember stand-alone backend startup time,roughly at the same point
+	 * during startup that postmaster does so.
+	 */
+	PgStartTime = GetCurrentTimestamp();
+
+	/*
+	 * Create a per-backend PGPROC struct in shared memory. We must do this
+	 * before we can use LWLocks.
+	 */
+	InitProcess();
+
+	/*
+	 * Now that sufficient infrastructure has been initialized, PostgresMain()
+	 * can do the rest.
+	 */
+	PostgresMain(dbname, username);
+}
+
+
+/* ----------------------------------------------------------------
+ * PostgresMain
+ *	   postgres main loop -- all backends, interactive or otherwise loop here
+ *
+ * dbname is the name of the database to connect to, username is the
+ * PostgreSQL user name to be used for the session.
+ *
+ * NB: Single user mode specific setup should go to PostgresSingleUserMain()
+ * if reasonably possible.
+ * ----------------------------------------------------------------
+ */
+void
+PostgresMain(const char *dbname, const char *username)
+{
+	int			firstchar;
+	StringInfoData input_message;
+	sigjmp_buf	local_sigjmp_buf;
+	volatile bool send_ready_for_query = true;
+	bool		idle_in_transaction_timeout_enabled = false;
+	bool		idle_session_timeout_enabled = false;
+
+	AssertArg(dbname != NULL);
+	AssertArg(username != NULL);
+
+	SetProcessingMode(InitProcessing);
 
 	/*
 	 * Set up signal handlers.  (InitPostmasterChild or InitStandaloneProcess
@@ -3993,44 +4083,8 @@ PostgresMain(int argc, char *argv[],
 									 * platforms */
 	}
 
-	if (!IsUnderPostmaster)
-	{
-		/*
-		 * Validate we have been given a reasonable-looking DataDir (if under
-		 * postmaster, assume postmaster did this already).
-		 */
-		checkDataDir();
-
-		/* Change into DataDir (if under postmaster, was done already) */
-		ChangeToDataDir();
-
-		/*
-		 * Create lockfile for data directory.
-		 */
-		CreateDataDirLockFile(false);
-
-		/* read control file (error checking and contains config ) */
-		LocalProcessControlFile(false);
-
-		/* Initialize MaxBackends (if under postmaster, was done already) */
-		InitializeMaxBackends();
-	}
-
 	/* Early initialization */
 	BaseInit();
-
-	/*
-	 * Create a per-backend PGPROC struct in shared memory, except in the
-	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do
-	 * this before we can use LWLocks (and in the EXEC_BACKEND case we already
-	 * had to do some stuff with LWLocks).
-	 */
-#ifdef EXEC_BACKEND
-	if (!IsUnderPostmaster)
-		InitProcess();
-#else
-	InitProcess();
-#endif
 
 	/* We need to allow SIGINT, etc during the initial transaction */
 	PG_SETMASK(&UnBlockSig);
@@ -4071,6 +4125,8 @@ PostgresMain(int argc, char *argv[],
 	 */
 	if (IsUnderPostmaster && Log_disconnections)
 		on_proc_exit(log_disconnections, 0);
+
+	pgstat_report_connect(MyDatabaseId);
 
 	/* Perform initialization specific to a WAL sender process. */
 	if (am_walsender)
@@ -4122,12 +4178,6 @@ PostgresMain(int argc, char *argv[],
 	MemoryContextSwitchTo(row_description_context);
 	initStringInfo(&row_description_buf);
 	MemoryContextSwitchTo(TopMemoryContext);
-
-	/*
-	 * Remember stand-alone backend startup time
-	 */
-	if (!IsUnderPostmaster)
-		PgStartTime = GetCurrentTimestamp();
 
 	/*
 	 * POSTGRES main processing loop begins here
@@ -4335,17 +4385,15 @@ PostgresMain(int argc, char *argv[],
 			}
 			else
 			{
-				/* Send out notify signals and transmit self-notifies */
-				ProcessCompletedNotifies();
-
 				/*
-				 * Also process incoming notifies, if any.  This is mostly to
-				 * ensure stable behavior in tests: if any notifies were
-				 * received during the just-finished transaction, they'll be
-				 * seen by the client before ReadyForQuery is.
+				 * Process incoming notifies (including self-notifies), if
+				 * any, and send relevant messages to the client.  Doing it
+				 * here helps ensure stable behavior in tests: if any notifies
+				 * were received during the just-finished transaction, they'll
+				 * be seen by the client before ReadyForQuery is.
 				 */
 				if (notifyInterruptPending)
-					ProcessNotifyInterrupt();
+					ProcessNotifyInterrupt(false);
 
 				pgstat_report_stat(false);
 

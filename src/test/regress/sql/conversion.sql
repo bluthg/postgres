@@ -30,7 +30,7 @@ DROP CONVERSION mydef;
 -- so there's no need to do that here.
 --
 --
--- return to the super user
+-- return to the superuser
 --
 RESET SESSION AUTHORIZATION;
 DROP USER regress_conversion_user;
@@ -40,7 +40,7 @@ DROP USER regress_conversion_user;
 --
 
 -- Helper function to test a conversion. Uses the test_enc_conversion function
--- that was created in the create_function_1 test.
+-- that was created in the create_function_0 test.
 create or replace function test_conv(
   input IN bytea,
   src_encoding IN text,

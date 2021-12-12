@@ -1,12 +1,15 @@
+
+# Copyright (c) 2021, PostgreSQL Global Development Group
+
 # Minimal test testing streaming replication
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
-use Test::More tests => 49;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More tests => 53;
 
 # Initialize primary node
-my $node_primary = get_new_node('primary');
+my $node_primary = PostgreSQL::Test::Cluster->new('primary');
 # A specific role is created to perform some tests related to replication,
 # and it needs proper authentication configuration.
 $node_primary->init(
@@ -19,7 +22,7 @@ my $backup_name = 'my_backup';
 $node_primary->backup($backup_name);
 
 # Create streaming standby linking to primary
-my $node_standby_1 = get_new_node('standby_1');
+my $node_standby_1 = PostgreSQL::Test::Cluster->new('standby_1');
 $node_standby_1->init_from_backup($node_primary, $backup_name,
 	has_streaming => 1);
 $node_standby_1->start;
@@ -34,7 +37,7 @@ $node_standby_1->backup('my_backup_2');
 $node_primary->start;
 
 # Create second standby node linking to standby 1
-my $node_standby_2 = get_new_node('standby_2');
+my $node_standby_2 = PostgreSQL::Test::Cluster->new('standby_2');
 $node_standby_2->init_from_backup($node_standby_1, $backup_name,
 	has_streaming => 1);
 $node_standby_2->start;
@@ -72,18 +75,20 @@ note "testing connection parameter \"target_session_attrs\"";
 # Expect to connect to $target_node (undef for failure) with given $status.
 sub test_target_session_attrs
 {
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
 	my $node1       = shift;
 	my $node2       = shift;
 	my $target_node = shift;
 	my $mode        = shift;
 	my $status      = shift;
 
-	my $node1_host = $node1->host;
-	my $node1_port = $node1->port;
-	my $node1_name = $node1->name;
-	my $node2_host = $node2->host;
-	my $node2_port = $node2->port;
-	my $node2_name = $node2->name;
+	my $node1_host  = $node1->host;
+	my $node1_port  = $node1->port;
+	my $node1_name  = $node1->name;
+	my $node2_host  = $node2->host;
+	my $node2_port  = $node2->port;
+	my $node2_name  = $node2->name;
 	my $target_port = undef;
 	$target_port = $target_node->port if (defined $target_node);
 	my $target_name = undef;
@@ -199,8 +204,8 @@ $node_primary->psql(
 	'postgres', "
 CREATE ROLE repl_role REPLICATION LOGIN;
 GRANT pg_read_all_settings TO repl_role;");
-my $primary_host    = $node_primary->host;
-my $primary_port    = $node_primary->port;
+my $primary_host   = $node_primary->host;
+my $primary_port   = $node_primary->port;
 my $connstr_common = "host=$primary_host port=$primary_port user=repl_role";
 my $connstr_rep    = "$connstr_common replication=1";
 my $connstr_db     = "$connstr_common replication=database dbname=postgres";
@@ -248,6 +253,36 @@ ok( $ret == 0,
 ok( $ret == 0,
 	"SHOW with superuser-settable parameter, replication role and logical replication"
 );
+
+note "testing READ_REPLICATION_SLOT command for replication connection";
+
+my $slotname = 'test_read_replication_slot_physical';
+
+($ret, $stdout, $stderr) = $node_primary->psql(
+	'postgres',
+	'READ_REPLICATION_SLOT non_existent_slot;',
+	extra_params => [ '-d', $connstr_rep ]);
+ok($ret == 0, "READ_REPLICATION_SLOT exit code 0 on success");
+like($stdout, qr/^\|\|$/,
+	"READ_REPLICATION_SLOT returns NULL values if slot does not exist");
+
+$node_primary->psql(
+	'postgres',
+	"CREATE_REPLICATION_SLOT $slotname PHYSICAL RESERVE_WAL;",
+	extra_params => [ '-d', $connstr_rep ]);
+
+($ret, $stdout, $stderr) = $node_primary->psql(
+	'postgres',
+	"READ_REPLICATION_SLOT $slotname;",
+	extra_params => [ '-d', $connstr_rep ]);
+ok($ret == 0, "READ_REPLICATION_SLOT success with existing slot");
+like($stdout, qr/^physical\|[^|]*\|1$/,
+	"READ_REPLICATION_SLOT returns tuple with slot information");
+
+$node_primary->psql(
+	'postgres',
+	"DROP_REPLICATION_SLOT $slotname;",
+	extra_params => [ '-d', $connstr_rep ]);
 
 note "switching to physical replication slot";
 
