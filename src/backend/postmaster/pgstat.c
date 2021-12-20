@@ -2239,10 +2239,11 @@ pgstat_report_toast_activity(Oid relid, int attr,
 							bool compressed,
 							int32 old_size,
 							int32 new_size,
-							int32 time_spent)
+							instr_time start_time)
 {
 	PgStat_BackendAttrIdentifier toastattr = { relid, attr };
 	PgStat_BackendToastEntry *htabent;
+	instr_time	time_spent;
 	bool		found;
 
 	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_toast)
@@ -2266,7 +2267,6 @@ pgstat_report_toast_activity(Oid relid, int attr,
 						  HASH_ENTER, &found);
 	if (!found)
 	{
-		elog(DEBUG2, "No toast entry found for attr %u of relation %u", attr, relid);
 		MemSet(&htabent->t_counts, 0, sizeof(PgStat_ToastCounts));
 	}
 
@@ -2274,26 +2274,24 @@ pgstat_report_toast_activity(Oid relid, int attr,
 	if (externalized)
 	{
 		htabent->t_counts.t_numexternalized++;
-		elog(DEBUG2, "Externalized counter raised for OID %u, attr %u, now %li", relid,attr, htabent->t_counts.t_numexternalized);
 	}
 	if (compressed)
 	{
 		htabent->t_counts.t_numcompressed++;
-		elog(DEBUG2, "Compressed counter raised for OID %u, attr %u, now %li", relid,attr, htabent->t_counts.t_numcompressed);
 		if (new_size)
 		{
 			htabent->t_counts.t_size_orig+=old_size;
-			elog(DEBUG2, "Old size %u added for OID %u, attr %u, now %li",old_size,relid,attr,  htabent->t_counts.t_size_orig);
 			if (new_size)
 			{
 				htabent->t_counts.t_numcompressionsuccess++;
-				elog(DEBUG2, "Compressed success counter raised for OID %u, attr %u, now %li",relid,attr, htabent->t_counts.t_numcompressionsuccess);
 				htabent->t_counts.t_size_compressed+=new_size;
-				elog(DEBUG2, "New size %u added for OID %u, attr %u, now %li",new_size,relid,attr, htabent->t_counts.t_size_compressed);
 			}
 		}
-		/* TODO: record times */
-	}	
+	}
+	/* record time spent */
+	INSTR_TIME_SET_CURRENT(time_spent);
+	INSTR_TIME_SUBTRACT(time_spent, start_time);
+	INSTR_TIME_ADD(htabent->t_counts.t_comp_time, time_spent);
 	
 	/* indicate that we have something to send */
 	have_toast_stats = true;
@@ -6411,7 +6409,6 @@ pgstat_recv_toaststat(PgStat_MsgToaststat *msg, int len)
 	int			i;
 	bool		found;
 
-	elog(DEBUG2, "Received TOAST statistics...");
 	dbentry = pgstat_get_db_entry(msg->m_databaseid, true);
 
 	/*
@@ -6429,24 +6426,24 @@ pgstat_recv_toaststat(PgStat_MsgToaststat *msg, int len)
 			 * If it's a new entry, initialize counters to the values
 			 * we just got.
 			 */
-			elog(DEBUG2, "First time I see this toastentry");
 			toastentry->t_numexternalized = toastmsg->t_numexternalized;
 			toastentry->t_numcompressed = toastmsg->t_numcompressed;
 			toastentry->t_numcompressionsuccess = toastmsg->t_numcompressionsuccess;
-			toastentry->t_size_compressed = toastmsg->t_size_compressed;
 			toastentry->t_size_orig = toastmsg->t_size_orig;
+			toastentry->t_size_compressed = toastmsg->t_size_compressed;
+			toastentry->t_comp_time = toastmsg->t_comp_time;
 		}
 		else
 		{
 			/*
 			 * Otherwise add the values to the existing entry.
 			 */
-			elog(DEBUG2, "Found this toastentry, updating");
 			toastentry->t_numexternalized += toastmsg->t_numexternalized;
 			toastentry->t_numcompressed += toastmsg->t_numcompressed;
 			toastentry->t_numcompressionsuccess += toastmsg->t_numcompressionsuccess;
-			toastentry->t_size_compressed += toastmsg->t_size_compressed;
 			toastentry->t_size_orig += toastmsg->t_size_orig;
+			toastentry->t_size_compressed += toastmsg->t_size_compressed;
+			toastentry->t_comp_time += toastmsg->t_comp_time;
 		}
 	}
 }

@@ -758,12 +758,12 @@ typedef struct PgStat_BackendAttrIdentifier
  */
 typedef struct PgStat_ToastCounts
 {
-	PgStat_Counter t_numexternalized;
-	PgStat_Counter t_numcompressed;
-	PgStat_Counter t_numcompressionsuccess;
-	uint64		   t_size_orig;
-	uint64		   t_size_compressed;
-	instr_time     t_comp_time;
+	PgStat_Counter	t_numexternalized;
+	PgStat_Counter	t_numcompressed;
+	PgStat_Counter	t_numcompressionsuccess;
+	uint64		t_size_orig;
+	uint64		t_size_compressed;
+	instr_time	t_comp_time;
 } PgStat_ToastCounts;
 
 /* ----------
@@ -773,7 +773,7 @@ typedef struct PgStat_ToastCounts
 typedef struct PgStat_BackendToastEntry
 {
 	PgStat_BackendAttrIdentifier	attr;
-	PgStat_ToastCounts 				t_counts;
+	PgStat_ToastCounts 		t_counts;
 } PgStat_BackendToastEntry;
 
 /* ----------
@@ -783,12 +783,12 @@ typedef struct PgStat_BackendToastEntry
 typedef struct PgStat_ToastEntry
 {
 	PgStat_BackendAttrIdentifier	attr;
-	PgStat_Counter 					t_numexternalized;
-	PgStat_Counter 					t_numcompressed;
-	PgStat_Counter 					t_numcompressionsuccess;
-	uint64		   					t_size_orig;
-	uint64		   					t_size_compressed;
-	PgStat_Counter					t_comp_time;	/* time in microseconds */
+	PgStat_Counter 			t_numexternalized;
+	PgStat_Counter 			t_numcompressed;
+	PgStat_Counter 			t_numcompressionsuccess;
+	uint64		   		t_size_orig;
+	uint64		   		t_size_compressed;
+	PgStat_Counter			t_comp_time;	/* time in microseconds */
 } PgStat_ToastEntry;
 
 /* ----------
@@ -1112,7 +1112,6 @@ typedef struct PgStat_StatToastEntry
 	PgStat_Counter t_numcompressionsuccess;
 	uint64		   t_size_orig;
 	uint64		   t_size_compressed;
-
 	PgStat_Counter t_comp_time;	/* time in microseconds */
 } PgStat_StatToastEntry;
 
@@ -1306,7 +1305,7 @@ pgstat_report_toast_activity(Oid relid, int attr,
 							bool compressed,
 							int32 old_size,
 							int32 new_size,
-							int32 time_spent);
+							instr_time start_time);
 
 extern void AtEOXact_PgStat(bool isCommit, bool parallel);
 extern void AtEOSubXact_PgStat(bool isCommit, int nestDepth);

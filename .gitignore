@@ -44,3 +44,5 @@ tags
 /Debug/
 /Release/
 /tmp_install/
+.gitignore
+pg_stat_toast.*

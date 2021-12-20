@@ -230,7 +230,9 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 	Datum	   *value = &ttc->ttc_values[attribute];
 	Datum		new_value;
 	ToastAttrInfo *attr = &ttc->ttc_attr[attribute];
+	instr_time	start_time;
 
+	INSTR_TIME_SET_CURRENT(start_time);
 	new_value = toast_compress_datum(*value, attr->tai_compression);
 
 	if (DatumGetPointer(new_value) != NULL)
@@ -245,7 +247,7 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 							true,
 							attr->tai_size,
 							VARSIZE(DatumGetPointer(*value)),
-							0);
+							start_time);
 		attr->tai_size = VARSIZE(DatumGetPointer(*value));
 		ttc->ttc_flags |= (TOAST_NEEDS_CHANGE | TOAST_NEEDS_FREE);
 	}
@@ -258,7 +260,7 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 							true,
 							0,
 							0,
-							0);
+							start_time);
 	}
 }
 
@@ -271,6 +273,9 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, int options)
 	Datum	   *value = &ttc->ttc_values[attribute];
 	Datum		old_value = *value;
 	ToastAttrInfo *attr = &ttc->ttc_attr[attribute];
+	instr_time	start_time;
+
+	INSTR_TIME_SET_CURRENT(start_time);
 
 	attr->tai_colflags |= TOASTCOL_IGNORE;
 	*value = toast_save_datum(ttc->ttc_rel, old_value, attr->tai_oldexternal,
@@ -284,7 +289,7 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, int options)
 							false,
 							0,
 							0,
-							0);
+							start_time);
 }
 
 /*
