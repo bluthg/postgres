@@ -30,6 +30,13 @@ my $tmp_installdir = "$topdir/tmp_install";
 do './src/tools/msvc/config_default.pl';
 do './src/tools/msvc/config.pl' if (-f 'src/tools/msvc/config.pl');
 
+# These values are defaults that can be overridden by the calling environment
+# (see buildenv.pl processing below).
+# c.f. src/Makefile.global.in and configure.ac
+$ENV{GZIP_PROGRAM} ||= 'gzip';
+$ENV{LZ4} ||= 'lz4';
+$ENV{TAR} ||= 'tar';
+
 # buildenv.pl is for specifying the build environment settings
 # it should contain lines like:
 # $ENV{PATH} = "c:/path/to/bison/bin;$ENV{PATH}";
@@ -66,13 +73,6 @@ $ENV{with_icu} = $config->{icu} ? 'yes' : 'no';
 $ENV{with_gssapi} = $config->{gss} ? 'yes' : 'no';
 $ENV{with_krb_srvnam} = $config->{krb_srvnam} || 'postgres';
 $ENV{with_readline} = 'no';
-
-# These values are defaults that can be overridden by the calling environment
-# (see buildenv.pl processing above).
-# c.f. src/Makefile.global.in and configure.ac
-$ENV{TAR} ||= 'tar';
-$ENV{LZ4} ||= 'lz4';
-$ENV{GZIP_PROGRAM} ||= 'gzip';
 
 $ENV{PATH} = "$topdir/$Config/libpq;$ENV{PATH}";
 
@@ -648,7 +648,9 @@ sub upgradecheck
 	print "\nSetting up new cluster\n\n";
 	standard_initdb() or exit 1;
 	print "\nRunning pg_upgrade\n\n";
-	@args = ('pg_upgrade', '-d', "$data.old", '-D', $data, '-b', $bindir);
+	@args = (
+		'pg_upgrade', '-d', "$data.old", '-D', $data, '-b', $bindir,
+		'--no-sync');
 	system(@args) == 0 or exit 1;
 	print "\nStarting new cluster\n\n";
 	@args = ('pg_ctl', '-l', "$logdir/postmaster2.log", 'start');
