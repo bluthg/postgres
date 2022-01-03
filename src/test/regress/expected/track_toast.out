@@ -1,6 +1,13 @@
 SHOW track_toast;
  track_toast 
 -------------
+ off
+(1 row)
+
+SET track_toast TO on;
+SHOW track_toast;
+ track_toast 
+-------------
  on
 (1 row)
 

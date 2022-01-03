@@ -1,4 +1,6 @@
 SHOW track_toast;
+SET track_toast TO on;
+SHOW track_toast;
 TABLE pg_stat_toast; -- view exists
 CREATE TABLE toast_test (cola TEXT, colb TEXT COMPRESSION lz4, colc TEXT , cold TEXT, cole TEXT);
 ALTER TABLE toast_test ALTER colc SET STORAGE EXTERNAL;
