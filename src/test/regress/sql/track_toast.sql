@@ -2,12 +2,52 @@ SHOW track_toast;
 SET track_toast TO on;
 SHOW track_toast;
 TABLE pg_stat_toast; -- view exists
+
+-- function to wait for counters to advance
+create function wait_for_stats() returns void as $$
+declare
+  start_time timestamptz := clock_timestamp();
+  updated1 bool;
+begin
+  -- we don't want to wait forever; loop will exit after 30 seconds
+  for i in 1 .. 300 loop
+
+    -- check to see if seqscan has been sensed
+    SELECT (st.n_tup_ins > 0) INTO updated1
+      FROM pg_stat_user_tables AS st
+     WHERE st.relname='toast_test';
+
+    exit when updated1;
+
+    -- wait a little
+    perform pg_sleep_for('100 milliseconds');
+
+    -- reset stats snapshot so we can test again
+    perform pg_stat_clear_snapshot();
+
+  end loop;
+
+  -- report time waited in postmaster log (where it won't change test output)
+  raise log 'wait_for_stats delayed % seconds',
+    extract(epoch from clock_timestamp() - start_time);
+end
+$$ language plpgsql;
+
 CREATE TABLE toast_test (cola TEXT, colb TEXT COMPRESSION lz4, colc TEXT , cold TEXT, cole TEXT);
 ALTER TABLE toast_test ALTER colc SET STORAGE EXTERNAL;
 ALTER TABLE toast_test ALTER cold SET STORAGE MAIN;
 ALTER TABLE toast_test ALTER cole SET STORAGE PLAIN;
 INSERT INTO toast_test VALUES (repeat(md5('a'),100), repeat(md5('a'),100), repeat(md5('a'),100), repeat(md5('a'),100), repeat(md5('a'),100) );
-SELECT pg_sleep(1); -- give the stats collector some time to send the stats upstream
+
+-- We can't just call wait_for_stats() at this point, because we only
+-- transmit stats when the session goes idle, and we probably didn't
+-- transmit the last couple of counts yet thanks to the rate-limiting logic
+-- in pgstat_report_stat().  But instead of waiting for the rate limiter's
+-- timeout to elapse, let's just start a new session.  The old one will
+-- then send its stats before dying.
+\c -
+SELECT wait_for_stats();
+
 SELECT attname
 	,storagemethod
 	,externalized
@@ -21,3 +61,4 @@ SELECT compressattempts=0 AS external_doesnt_compress FROM pg_stat_toast WHERE r
 SELECT externalized=0 AS main_doesnt_externalize FROM pg_stat_toast WHERE relname = 'toast_test' AND storagemethod = 'm';
 DROP TABLE toast_test;
 SELECT count(*) FROM pg_stat_toast WHERE relname = 'toast_test';
+DROP FUNCTION wait_for_stats();
