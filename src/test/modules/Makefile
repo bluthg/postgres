@@ -27,6 +27,7 @@ SUBDIRS = \
 		  test_regex \
 		  test_rls_hooks \
 		  test_shm_mq \
+		  track_toast \
 		  unsafe_tests \
 		  worker_spi
 
