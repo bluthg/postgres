@@ -2293,7 +2293,7 @@ pgstat_report_toast_activity(Oid relid, int attr,
 	}
 	/* record time spent */
 	INSTR_TIME_ADD(htabent->t_counts.t_comp_time, time_spent);
-	
+
 	/* indicate that we have something to send */
 	have_toast_stats = true;
 }
@@ -3887,7 +3887,7 @@ PgstatCollectorMain(int argc, char *argv[])
 				case PGSTAT_MTYPE_TOASTSTAT:
 					pgstat_recv_toaststat(&msg.msg_toaststat, len);
 					break;
-				
+
 				case PGSTAT_MTYPE_RECOVERYCONFLICT:
 					pgstat_recv_recoveryconflict(&msg.msg_recoveryconflict,
 												 len);
