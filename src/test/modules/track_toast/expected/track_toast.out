@@ -37,14 +37,17 @@ FROM pg_stat_toast WHERE relname = 'toast_test' ORDER BY attname;
  cold    | m             |            0 |                |                1 |                 1 | t                 | t
 (4 rows)
 
-SELECT storagemethod,compressmethod FROM pg_stat_toast WHERE relname = 'toast_test' ORDER BY total_time DESC;
- storagemethod | compressmethod 
----------------+----------------
- e             | 
- x             | 
- x             | l
- m             | 
-(4 rows)
+SELECT compressattempts=0 AS external_doesnt_compress FROM pg_stat_toast WHERE relname = 'toast_test' AND storagemethod = 'e';
+ external_doesnt_compress 
+--------------------------
+ t
+(1 row)
+
+SELECT externalized=0 AS main_doesnt_externalize FROM pg_stat_toast WHERE relname = 'toast_test' AND storagemethod = 'm';
+ main_doesnt_externalize 
+-------------------------
+ t
+(1 row)
 
 DROP TABLE toast_test;
 SELECT count(*) FROM pg_stat_toast WHERE relname = 'toast_test';
