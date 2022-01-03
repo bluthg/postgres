@@ -106,7 +106,7 @@
 #define PGSTAT_DB_HASH_SIZE		16
 #define PGSTAT_TAB_HASH_SIZE	512
 #define PGSTAT_FUNCTION_HASH_SIZE	512
-#define PGSTAT_TOAST_HASH_SIZE	512
+#define PGSTAT_TOAST_HASH_SIZE	64
 #define PGSTAT_SUBWORKER_HASH_SIZE	32
 #define PGSTAT_REPLSLOT_HASH_SIZE	32
 
@@ -117,7 +117,7 @@
  */
 bool		pgstat_track_counts = false;
 int			pgstat_track_functions = TRACK_FUNC_OFF;
-bool		pgstat_track_toast = true;
+bool		pgstat_track_toast = false;
 
 /* ----------
  * Built from GUC parameter
@@ -2249,6 +2249,9 @@ pgstat_report_toast_activity(Oid relid, int attr,
 	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_toast)
 		return;
 
+	INSTR_TIME_SET_CURRENT(time_spent);
+	INSTR_TIME_SUBTRACT(time_spent, start_time);
+
 	if (!pgStatToastActions)
 	{
 		/* First time through - initialize toast stat table */
@@ -2289,8 +2292,6 @@ pgstat_report_toast_activity(Oid relid, int attr,
 		}
 	}
 	/* record time spent */
-	INSTR_TIME_SET_CURRENT(time_spent);
-	INSTR_TIME_SUBTRACT(time_spent, start_time);
 	INSTR_TIME_ADD(htabent->t_counts.t_comp_time, time_spent);
 	
 	/* indicate that we have something to send */
