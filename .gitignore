@@ -31,6 +31,8 @@ win32ver.rc
 *.exe
 lib*dll.def
 lib*.pc
+tags
+/.vscode
 
 # Local excludes in root directory
 /GNUmakefile
@@ -42,3 +44,5 @@ lib*.pc
 /Debug/
 /Release/
 /tmp_install/
+.gitignore
+pg_stat_toast.*
