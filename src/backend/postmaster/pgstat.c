@@ -1142,7 +1142,6 @@ pgstat_send_funcstats(void)
 static void
 pgstat_send_toaststats(void)
 {
-	/* we assume this inits to all zeroes: */
 	static const PgStat_ToastCounts all_zeroes;
 
 	PgStat_MsgToaststat msg;
