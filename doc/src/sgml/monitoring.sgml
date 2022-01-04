@@ -5077,7 +5077,7 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <structfield>compressmethod</structfield> <type>char</type>
       </para>
       <para>
-       Compression method of the attribute (empty means default)
+       Current compression method of the attribute (empty means default)
       </para></entry>
      </row>
 
@@ -5086,7 +5086,7 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <structfield>compressattempts</structfield> <type>bigint</type>
       </para>
       <para>
-       Number of times this attribute was compressed
+       Number of times compression of this attribute was attempted
       </para></entry>
      </row>
 
@@ -5095,7 +5095,7 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <structfield>compresssuccesses</structfield> <type>bigint</type>
       </para>
       <para>
-       Number of times the compression was successful (gained a size reduction)
+       Number of times compression of this attribute was successful
       </para></entry>
      </row>
 

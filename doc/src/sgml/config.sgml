@@ -7688,7 +7688,7 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         your databases, may significantly increase the size of the statistics files
         and the workload of the statistics collector. It is recommended to only
         temporarily activate this to assess the right compression and storage method
-        for (a) column(s).
+        for a column.
         </para>
        </note>
       </listitem>
