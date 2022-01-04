@@ -1041,7 +1041,7 @@ CREATE VIEW pg_stat_user_functions AS
 
 
 CREATE OR REPLACE VIEW pg_stat_toast AS
- SELECT 
+ SELECT
     n.nspname AS schemaname,
     a.attrelid AS reloid,
     a.attnum AS attnum,

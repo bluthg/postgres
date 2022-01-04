@@ -247,7 +247,7 @@ SELECT attname
 	,compressattempts
 	,compresssuccesses
 	,compressedsize < originalsize AS compression_works
-	, total_time > 0 AS takes_time 
+	, total_time > 0 AS takes_time
 FROM pg_stat_toast WHERE relname = 'toast_test' ORDER BY attname;
 SELECT compressattempts=0 AS external_doesnt_compress FROM pg_stat_toast WHERE relname = 'toast_test' AND storagemethod = 'e';
 SELECT externalized=0 AS main_doesnt_externalize FROM pg_stat_toast WHERE relname = 'toast_test' AND storagemethod = 'm';
