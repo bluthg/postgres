@@ -82,7 +82,6 @@ typedef enum StatMsgType
 	PGSTAT_MTYPE_DEADLOCK,
 	PGSTAT_MTYPE_CHECKSUMFAILURE,
 	PGSTAT_MTYPE_REPLSLOT,
-	PGSTAT_MTYPE_CONNECTION,
 	PGSTAT_MTYPE_CONNECT,
 	PGSTAT_MTYPE_DISCONNECT,
 	PGSTAT_MTYPE_SUBSCRIPTIONPURGE,
@@ -777,7 +776,7 @@ typedef struct PgStat_BackendToastEntry
 } PgStat_BackendToastEntry;
 
 /* ----------
- * PgStat_ToastEntry			Per-TOAST-column info in a MsgFuncstat
+ * PgStat_ToastEntry			Per-TOAST-column info in a MsgToaststat
  * ----------
  */
 typedef struct PgStat_ToastEntry

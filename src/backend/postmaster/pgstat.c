@@ -2281,14 +2281,11 @@ pgstat_report_toast_activity(Oid relid, int attr,
 	if (compressed)
 	{
 		htabent->t_counts.t_numcompressed++;
+		htabent->t_counts.t_size_orig+=old_size;
 		if (new_size)
 		{
-			htabent->t_counts.t_size_orig+=old_size;
-			if (new_size)
-			{
-				htabent->t_counts.t_numcompressionsuccess++;
-				htabent->t_counts.t_size_compressed+=new_size;
-			}
+			htabent->t_counts.t_numcompressionsuccess++;
+			htabent->t_counts.t_size_compressed+=new_size;
 		}
 	}
 	/* record time spent */
