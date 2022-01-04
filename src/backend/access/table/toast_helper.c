@@ -22,7 +22,7 @@
 #include "pgstat.h"
 
 extern PGDLLIMPORT bool pgstat_track_toast;
-		
+
 /*
  * Prepare to TOAST a tuple.
  *
@@ -233,7 +233,7 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 	ToastAttrInfo *attr = &ttc->ttc_attr[attribute];
 	instr_time	start_time;
 
-	if (pgstat_track_toast) 
+	if (pgstat_track_toast)
 	{
 		INSTR_TIME_SET_CURRENT(start_time);
 	}
@@ -246,7 +246,7 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 			pfree(DatumGetPointer(*value));
 		*value = new_value;
 		attr->tai_colflags |= TOASTCOL_NEEDS_FREE;
-		if (pgstat_track_toast) 
+		if (pgstat_track_toast)
 		{
 			pgstat_report_toast_activity(ttc->ttc_rel->rd_rel->oid, attribute,
 							false,
@@ -262,7 +262,7 @@ toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 	{
 		/* incompressible, ignore on subsequent compression passes */
 		attr->tai_colflags |= TOASTCOL_INCOMPRESSIBLE;
-		if (pgstat_track_toast) 
+		if (pgstat_track_toast)
 		{
 			pgstat_report_toast_activity(ttc->ttc_rel->rd_rel->oid, attribute,
 							false,
@@ -285,7 +285,7 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, int options)
 	ToastAttrInfo *attr = &ttc->ttc_attr[attribute];
 	instr_time	start_time;
 
-	if (pgstat_track_toast) 
+	if (pgstat_track_toast)
 	{
 		INSTR_TIME_SET_CURRENT(start_time);
 	}
@@ -297,7 +297,7 @@ toast_tuple_externalize(ToastTupleContext *ttc, int attribute, int options)
 		pfree(DatumGetPointer(old_value));
 	attr->tai_colflags |= TOASTCOL_NEEDS_FREE;
 	ttc->ttc_flags |= (TOAST_NEEDS_CHANGE | TOAST_NEEDS_FREE);
-	if (pgstat_track_toast) 
+	if (pgstat_track_toast)
 	{
 		pgstat_report_toast_activity(ttc->ttc_rel->rd_rel->oid, attribute,
 							true,
