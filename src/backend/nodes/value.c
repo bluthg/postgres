@@ -4,7 +4,7 @@
  *	  implementation of value nodes
  *
  *
- * Copyright (c) 2003-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2003-2022, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -24,7 +24,7 @@ makeInteger(int i)
 {
 	Integer	   *v = makeNode(Integer);
 
-	v->val = i;
+	v->ival = i;
 	return v;
 }
 
@@ -38,7 +38,7 @@ makeFloat(char *numericStr)
 {
 	Float	   *v = makeNode(Float);
 
-	v->val = numericStr;
+	v->fval = numericStr;
 	return v;
 }
 
@@ -52,7 +52,7 @@ makeString(char *str)
 {
 	String	   *v = makeNode(String);
 
-	v->val = str;
+	v->sval = str;
 	return v;
 }
 
@@ -66,6 +66,6 @@ makeBitString(char *str)
 {
 	BitString  *v = makeNode(BitString);
 
-	v->val = str;
+	v->bsval = str;
 	return v;
 }
