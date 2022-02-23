@@ -122,7 +122,7 @@ main(int argc, char **argv)
 		{"no-sync", no_argument, NULL, 'N'},
 		{"progress", no_argument, NULL, 'P'},
 		{"debug", no_argument, NULL, 3},
-		{"config-file", no_argument, NULL, 5},
+		{"config-file", required_argument, NULL, 5},
 		{NULL, 0, NULL, 0}
 	};
 	int			option_index;
@@ -240,14 +240,6 @@ main(int argc, char **argv)
 		pg_log_error("no source server information (--source-server) specified for --write-recovery-conf");
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 		exit(1);
-	}
-
-	if (config_file == NULL)
-	/* easier to just declare the config_file based on datadir_target right now */
-	{
-		snprintf(config_file, sizeof(config_file),
-			 "\"%s/postgresql.conf\"",
-			 datadir_target);
 	}
 
 	if (optind < argc)
@@ -1031,6 +1023,7 @@ getRestoreCommand(const char *argv0)
 {
 	int			rc;
 	char		postgres_exec_path[MAXPGPATH],
+				config_file_path[MAXPGPATH],
 				postgres_cmd[MAXPGPATH],
 				cmd_output[MAXPGPATH];
 
@@ -1062,13 +1055,24 @@ getRestoreCommand(const char *argv0)
 		exit(1);
 	}
 
+	if (config_file == NULL)
+	{
+		snprintf(config_file_path, sizeof(config_file_path),
+			 "%s/postgresql.conf",
+			 datadir_target);
+	} else {
+		snprintf(config_file_path, sizeof(config_file_path),
+			 "%s",
+			 config_file);
+	}
+
 	/*
 	 * Build a command able to retrieve the value of GUC parameter
 	 * restore_command, if set.
 	 */
 	snprintf(postgres_cmd, sizeof(postgres_cmd),
 			 "\"%s\" -D \"%s\" --config_file=\"%s\" -C restore_command",
-			 postgres_exec_path, datadir_target, config_file);
+			 postgres_exec_path, datadir_target, config_file_path);
 
 	if (!pipe_read_line(postgres_cmd, cmd_output, sizeof(cmd_output)))
 		exit(1);

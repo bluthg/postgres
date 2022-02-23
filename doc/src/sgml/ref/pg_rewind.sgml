@@ -242,6 +242,17 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--config-file=<replaceable class="parameter">filepath</replaceable></option></term>
+      <listitem>
+       <para>
+        In case the <filename>postgresql.conf</filename> of your target cluster is not in the 
+	target pgdata and you want to use the <option>-c</option> option,
+	provide a full or relative path to it using this option.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--debug</option></term>
       <listitem>
        <para>
