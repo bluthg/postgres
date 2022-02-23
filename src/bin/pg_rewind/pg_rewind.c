@@ -87,7 +87,7 @@ usage(const char *progname)
 	printf(_("Options:\n"));
 	printf(_("  -c, --restore-target-wal       use restore_command in target configuration to\n"
 			 "                                 retrieve WAL files from archives\n"));
-	printf(_("      --config-file=FILE         path to postgresql.conf if outside target-pgdata\n"));
+	printf(_("      --config-file=FILE         path to postgresql.conf if outside target-pgdata (for -c)\n"));
 	printf(_("  -D, --target-pgdata=DIRECTORY  existing data directory to modify\n"));
 	printf(_("      --source-pgdata=DIRECTORY  source data directory to synchronize with\n"));
 	printf(_("      --source-server=CONNSTR    source server to synchronize with\n"));
