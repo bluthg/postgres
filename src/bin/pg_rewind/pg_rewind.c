@@ -60,6 +60,7 @@ char	   *datadir_target = NULL;
 char	   *datadir_source = NULL;
 char	   *connstr_source = NULL;
 char	   *restore_command = NULL;
+char	   *config_file = NULL;
 
 static bool debug = false;
 bool		showprogress = false;
@@ -86,6 +87,7 @@ usage(const char *progname)
 	printf(_("Options:\n"));
 	printf(_("  -c, --restore-target-wal       use restore_command in target configuration to\n"
 			 "                                 retrieve WAL files from archives\n"));
+	printf(_("      --config-file=FILE         path to postgresql.conf if outside target-pgdata\n"));
 	printf(_("  -D, --target-pgdata=DIRECTORY  existing data directory to modify\n"));
 	printf(_("      --source-pgdata=DIRECTORY  source data directory to synchronize with\n"));
 	printf(_("      --source-server=CONNSTR    source server to synchronize with\n"));
@@ -120,6 +122,7 @@ main(int argc, char **argv)
 		{"no-sync", no_argument, NULL, 'N'},
 		{"progress", no_argument, NULL, 'P'},
 		{"debug", no_argument, NULL, 3},
+		{"config-file", no_argument, NULL, 5},
 		{NULL, 0, NULL, 0}
 	};
 	int			option_index;
@@ -204,6 +207,10 @@ main(int argc, char **argv)
 			case 4:
 				no_ensure_shutdown = true;
 				break;
+
+			case 5:
+				config_file = pg_strdup(optarg);
+				break;
 		}
 	}
 
@@ -233,6 +240,14 @@ main(int argc, char **argv)
 		pg_log_error("no source server information (--source-server) specified for --write-recovery-conf");
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 		exit(1);
+	}
+
+	if (config_file == NULL)
+	/* easier to just declare the config_file based on datadir_target right now */
+	{
+		snprintf(config_file, sizeof(config_file),
+			 "\"%s/postgresql.conf\"",
+			 datadir_target);
 	}
 
 	if (optind < argc)
@@ -1052,8 +1067,8 @@ getRestoreCommand(const char *argv0)
 	 * restore_command, if set.
 	 */
 	snprintf(postgres_cmd, sizeof(postgres_cmd),
-			 "\"%s\" -D \"%s\" -C restore_command",
-			 postgres_exec_path, datadir_target);
+			 "\"%s\" -D \"%s\" --config_file=\"%s\" -C restore_command",
+			 postgres_exec_path, datadir_target, config_file);
 
 	if (!pipe_read_line(postgres_cmd, cmd_output, sizeof(cmd_output)))
 		exit(1);
