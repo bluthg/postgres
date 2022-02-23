@@ -1023,7 +1023,6 @@ getRestoreCommand(const char *argv0)
 {
 	int			rc;
 	char		postgres_exec_path[MAXPGPATH],
-				config_file_path[MAXPGPATH],
 				postgres_cmd[MAXPGPATH],
 				cmd_output[MAXPGPATH];
 
@@ -1055,24 +1054,20 @@ getRestoreCommand(const char *argv0)
 		exit(1);
 	}
 
-	if (config_file == NULL)
-	{
-		snprintf(config_file_path, sizeof(config_file_path),
-			 "%s/postgresql.conf",
-			 datadir_target);
-	} else {
-		snprintf(config_file_path, sizeof(config_file_path),
-			 "%s",
-			 config_file);
-	}
-
 	/*
 	 * Build a command able to retrieve the value of GUC parameter
 	 * restore_command, if set.
 	 */
-	snprintf(postgres_cmd, sizeof(postgres_cmd),
+	if (config_file == NULL)
+	{
+	    snprintf(postgres_cmd, sizeof(postgres_cmd),
+			 "\"%s\" -D \"%s\" -C restore_command",
+			 postgres_exec_path, datadir_target);
+	} else {
+	    snprintf(postgres_cmd, sizeof(postgres_cmd),
 			 "\"%s\" -D \"%s\" --config_file=\"%s\" -C restore_command",
-			 postgres_exec_path, datadir_target, config_file_path);
+			 postgres_exec_path, datadir_target, config_file);
+	}
 
 	if (!pipe_read_line(postgres_cmd, cmd_output, sizeof(cmd_output)))
 		exit(1);
