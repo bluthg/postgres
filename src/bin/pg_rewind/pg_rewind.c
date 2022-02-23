@@ -1060,11 +1060,11 @@ getRestoreCommand(const char *argv0)
 	 */
 	if (config_file == NULL)
 	{
-	    snprintf(postgres_cmd, sizeof(postgres_cmd),
+		snprintf(postgres_cmd, sizeof(postgres_cmd),
 			 "\"%s\" -D \"%s\" -C restore_command",
 			 postgres_exec_path, datadir_target);
 	} else {
-	    snprintf(postgres_cmd, sizeof(postgres_cmd),
+		snprintf(postgres_cmd, sizeof(postgres_cmd),
 			 "\"%s\" -D \"%s\" --config_file=\"%s\" -C restore_command",
 			 postgres_exec_path, datadir_target, config_file);
 	}
