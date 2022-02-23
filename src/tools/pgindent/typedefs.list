@@ -607,6 +607,7 @@ EndDirectModify_function
 EndForeignInsert_function
 EndForeignModify_function
 EndForeignScan_function
+EndOfWalRecoveryInfo
 EndSampleScan_function
 EnumItem
 EolType
@@ -969,7 +970,7 @@ GistHstoreOptions
 GistInetKey
 GistNSN
 GistOptBufferingMode
-GistSortedBuildPageState
+GistSortedBuildLevelState
 GistSplitUnion
 GistSplitVector
 GistTsVectorOptions
@@ -2052,6 +2053,7 @@ PsqlScanStateData
 PsqlSettings
 Publication
 PublicationActions
+PublicationDesc
 PublicationInfo
 PublicationObjSpec
 PublicationObjSpecType
@@ -2198,6 +2200,7 @@ ReorderBufferApplyChangeCB
 ReorderBufferApplyTruncateCB
 ReorderBufferBeginCB
 ReorderBufferChange
+ReorderBufferChangeType
 ReorderBufferCommitCB
 ReorderBufferCommitPreparedCB
 ReorderBufferDiskChange
@@ -2945,6 +2948,7 @@ XLogRecordBlockCompressHeader
 XLogRecordBlockHeader
 XLogRecordBlockImageHeader
 XLogRecordBuffer
+XLogRecoveryCtlData
 XLogRedoAction
 XLogSegNo
 XLogSource
@@ -3504,6 +3508,7 @@ replace_rte_variables_context
 ret_type
 rewind_source
 rewrite_event
+rf_context
 rijndael_ctx
 rm_detail_t
 role_auth_extra

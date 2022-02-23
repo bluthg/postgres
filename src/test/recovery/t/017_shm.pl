@@ -25,10 +25,6 @@ if ($@ || $windows_os)
 {
 	plan skip_all => 'SysV shared memory not supported by this platform';
 }
-else
-{
-	plan tests => 4;
-}
 
 my $tempdir = PostgreSQL::Test::Utils::tempdir;
 
@@ -116,7 +112,7 @@ log_ipcs();
 $gnat->start;
 log_ipcs();
 
-my $regress_shlib = PostgreSQL::Test::Utils::perl2host($ENV{REGRESS_SHLIB});
+my $regress_shlib = $ENV{REGRESS_SHLIB};
 $gnat->safe_psql('postgres', <<EOSQL);
 CREATE FUNCTION wait_pid(int)
    RETURNS void
@@ -207,6 +203,9 @@ sub poll_start
 		# Wait 0.1 second before retrying.
 		usleep(100_000);
 
+		# Clean up in case the start attempt just timed out or some such.
+		$node->stop('fast', fail_ok => 1);
+
 		$attempts++;
 	}
 
@@ -215,3 +214,5 @@ sub poll_start
 	$node->start && return 1;
 	return 0;
 }
+
+done_testing();

@@ -36,6 +36,7 @@ do './src/tools/msvc/config.pl' if (-f 'src/tools/msvc/config.pl');
 $ENV{GZIP_PROGRAM} ||= 'gzip';
 $ENV{LZ4} ||= 'lz4';
 $ENV{TAR} ||= 'tar';
+$ENV{ZSTD} ||= 'zstd';
 
 # buildenv.pl is for specifying the build environment settings
 # it should contain lines like:
@@ -536,7 +537,6 @@ sub recoverycheck
 {
 	InstallTemp();
 
-	my $mstat  = 0;
 	my $dir    = "$topdir/src/test/recovery";
 	my $status = tap_check($dir);
 	exit $status if $status;
@@ -715,7 +715,6 @@ sub fetchRegressOpts
 # list is returned if the module does not need to run anything.
 sub fetchTests
 {
-
 	my $handle;
 	open($handle, '<', "GNUmakefile")
 	  || open($handle, '<', "Makefile")
@@ -781,7 +780,7 @@ sub InstallTemp
 sub usage
 {
 	print STDERR
-	  "Usage: vcregress.pl <mode> [ <arg>]\n\n",
+	  "Usage: vcregress.pl <mode> [<arg>]\n\n",
 	  "Options for <mode>:\n",
 	  "  bincheck       run tests of utilities in src/bin/\n",
 	  "  check          deploy instance and run regression tests on it\n",

@@ -11,7 +11,7 @@ use PostgreSQL::Test::Utils;
 use PostgreSQL::Test::Cluster;
 
 use File::Path qw(rmtree);
-use Test::More tests => $PostgreSQL::Test::Utils::windows_os ? 16 : 20;
+use Test::More;
 use Time::HiRes qw(usleep);
 
 $ENV{PGDATABASE} = 'postgres';
@@ -316,13 +316,16 @@ $node_primary3->append_conf(
 	max_wal_size = 2MB
 	log_checkpoints = yes
 	max_slot_wal_keep_size = 1MB
+
+	# temp debugging aid to analyze 019_replslot_limit failures
+	log_min_messages=debug3
 	));
 $node_primary3->start;
 $node_primary3->safe_psql('postgres',
 	"SELECT pg_create_physical_replication_slot('rep3')");
 # Take backup
 $backup_name = 'my_backup';
-$node_primary3->backup($backup_name);
+$node_primary3->backup($backup_name, backup_options => ['--verbose']);
 # Create standby
 my $node_standby3 = PostgreSQL::Test::Cluster->new('standby_3');
 $node_standby3->init_from_backup($node_primary3, $backup_name,
@@ -421,3 +424,5 @@ sub find_in_log
 
 	return $log =~ m/$pat/;
 }
+
+done_testing();

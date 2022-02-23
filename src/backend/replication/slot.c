@@ -46,6 +46,7 @@
 #include "pgstat.h"
 #include "replication/slot.h"
 #include "storage/fd.h"
+#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
@@ -99,6 +100,7 @@ ReplicationSlot *MyReplicationSlot = NULL;
 int			max_replication_slots = 0;	/* the maximum number of replication
 										 * slots */
 
+static void ReplicationSlotShmemExit(int code, Datum arg);
 static void ReplicationSlotDropAcquired(void);
 static void ReplicationSlotDropPtr(ReplicationSlot *slot);
 
@@ -158,6 +160,33 @@ ReplicationSlotsShmemInit(void)
 			ConditionVariableInit(&slot->active_cv);
 		}
 	}
+}
+
+/*
+ * Register the callback for replication slot cleanup and releasing.
+ */
+void
+ReplicationSlotInitialize(void)
+{
+	before_shmem_exit(ReplicationSlotShmemExit, 0);
+}
+
+/*
+ * Release and cleanup replication slots.
+ */
+static void
+ReplicationSlotShmemExit(int code, Datum arg)
+{
+	/* temp debugging aid to analyze 019_replslot_limit failures */
+	elog(DEBUG3, "replication slot exit hook, %s active slot",
+		 MyReplicationSlot != NULL ? "with" : "without");
+
+	/* Make sure active replication slots are released */
+	if (MyReplicationSlot != NULL)
+		ReplicationSlotRelease();
+
+	/* Also cleanup all the temporary slots. */
+	ReplicationSlotCleanup();
 }
 
 /*
@@ -529,6 +558,9 @@ ReplicationSlotCleanup(void)
 	Assert(MyReplicationSlot == NULL);
 
 restart:
+	/* temp debugging aid to analyze 019_replslot_limit failures */
+	elog(DEBUG3, "temporary replication slot cleanup: begin");
+
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 	for (i = 0; i < max_replication_slots; i++)
 	{
@@ -554,6 +586,8 @@ restart:
 	}
 
 	LWLockRelease(ReplicationSlotControlLock);
+
+	elog(DEBUG3, "temporary replication slot cleanup: done");
 }
 
 /*
@@ -1259,6 +1293,12 @@ InvalidatePossiblyObsoleteSlot(ReplicationSlot *s, XLogRecPtr oldestLSN,
 				(void) kill(active_pid, SIGTERM);
 				last_signaled_pid = active_pid;
 			}
+			else
+			{
+				/* temp debugging aid to analyze 019_replslot_limit failures */
+				elog(DEBUG3, "not signalling process %d during invalidation of slot \"%s\"",
+					 active_pid, NameStr(slotname));
+			}
 
 			/* Wait until the slot is released. */
 			ConditionVariableSleep(&s->active_cv,
@@ -1322,6 +1362,10 @@ InvalidateObsoleteReplicationSlots(XLogSegNo oldestSegno)
 	XLogSegNoOffsetToRecPtr(oldestSegno, 0, wal_segment_size, oldestLSN);
 
 restart:
+	/* temp debugging aid to analyze 019_replslot_limit failures */
+	elog(DEBUG3, "begin invalidating obsolete replication slots older than %X/%X",
+		 LSN_FORMAT_ARGS(oldestLSN));
+
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 	for (int i = 0; i < max_replication_slots; i++)
 	{
@@ -1346,6 +1390,8 @@ restart:
 		ReplicationSlotsComputeRequiredXmin(false);
 		ReplicationSlotsComputeRequiredLSN();
 	}
+
+	elog(DEBUG3, "done invalidating obsolete replication slots");
 
 	return invalidated;
 }

@@ -2750,6 +2750,9 @@ _copyA_Const(const A_Const *from)
 			case T_Float:
 				COPY_STRING_FIELD(val.fval.fval);
 				break;
+			case T_Boolean:
+				COPY_SCALAR_FIELD(val.boolval.boolval);
+				break;
 			case T_String:
 				COPY_STRING_FIELD(val.sval.sval);
 				break;
@@ -3069,6 +3072,7 @@ _copyConstraint(const Constraint *from)
 	COPY_NODE_FIELD(raw_expr);
 	COPY_STRING_FIELD(cooked_expr);
 	COPY_SCALAR_FIELD(generated_when);
+	COPY_SCALAR_FIELD(nulls_not_distinct);
 	COPY_NODE_FIELD(keys);
 	COPY_NODE_FIELD(including);
 	COPY_NODE_FIELD(exclusions);
@@ -3661,6 +3665,7 @@ _copyIndexStmt(const IndexStmt *from)
 	COPY_SCALAR_FIELD(oldCreateSubid);
 	COPY_SCALAR_FIELD(oldFirstRelfilenodeSubid);
 	COPY_SCALAR_FIELD(unique);
+	COPY_SCALAR_FIELD(nulls_not_distinct);
 	COPY_SCALAR_FIELD(primary);
 	COPY_SCALAR_FIELD(isconstraint);
 	COPY_SCALAR_FIELD(deferrable);
@@ -4051,6 +4056,16 @@ _copyAlterDatabaseStmt(const AlterDatabaseStmt *from)
 
 	COPY_STRING_FIELD(dbname);
 	COPY_NODE_FIELD(options);
+
+	return newnode;
+}
+
+static AlterDatabaseRefreshCollStmt *
+_copyAlterDatabaseRefreshCollStmt(const AlterDatabaseRefreshCollStmt *from)
+{
+	AlterDatabaseRefreshCollStmt *newnode = makeNode(AlterDatabaseRefreshCollStmt);
+
+	COPY_STRING_FIELD(dbname);
 
 	return newnode;
 }
@@ -4834,6 +4849,7 @@ _copyPublicationTable(const PublicationTable *from)
 	PublicationTable *newnode = makeNode(PublicationTable);
 
 	COPY_NODE_FIELD(relation);
+	COPY_NODE_FIELD(whereClause);
 
 	return newnode;
 }
@@ -4945,6 +4961,16 @@ _copyFloat(const Float *from)
 	Float	   *newnode = makeNode(Float);
 
 	COPY_STRING_FIELD(fval);
+
+	return newnode;
+}
+
+static Boolean *
+_copyBoolean(const Boolean *from)
+{
+	Boolean	   *newnode = makeNode(Boolean);
+
+	COPY_SCALAR_FIELD(boolval);
 
 	return newnode;
 }
@@ -5356,6 +5382,9 @@ copyObjectImpl(const void *from)
 		case T_Float:
 			retval = _copyFloat(from);
 			break;
+		case T_Boolean:
+			retval = _copyBoolean(from);
+			break;
 		case T_String:
 			retval = _copyString(from);
 			break;
@@ -5568,6 +5597,9 @@ copyObjectImpl(const void *from)
 			break;
 		case T_AlterDatabaseStmt:
 			retval = _copyAlterDatabaseStmt(from);
+			break;
+		case T_AlterDatabaseRefreshCollStmt:
+			retval = _copyAlterDatabaseRefreshCollStmt(from);
 			break;
 		case T_AlterDatabaseSetStmt:
 			retval = _copyAlterDatabaseSetStmt(from);
