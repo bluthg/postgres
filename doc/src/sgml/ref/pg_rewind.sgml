@@ -246,7 +246,7 @@ PostgreSQL documentation
       <listitem>
        <para>
         In case the <filename>postgresql.conf</filename> of your target cluster is not in the 
-        target pgdata and you want to use the <option>-c</option> option,
+        target pgdata and you want to use the <option>-c / --restore-target-wal</option> option,
         provide a (relative or absolute) path to the <filename>postgresql.conf</filename> using this option.
        </para>
       </listitem>
