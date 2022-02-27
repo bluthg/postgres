@@ -23,6 +23,7 @@
 #include "common/restricted_token.h"
 #include "common/string.h"
 #include "fe_utils/recovery_gen.h"
+#include "fe_utils/string_utils.h"
 #include "file_ops.h"
 #include "filemap.h"
 #include "getopt_long.h"
@@ -1023,8 +1024,8 @@ getRestoreCommand(const char *argv0)
 {
 	int			rc;
 	char		postgres_exec_path[MAXPGPATH],
-				postgres_cmd[MAXPGPATH],
 				cmd_output[MAXPGPATH];
+	PQExpBuffer	postgres_cmd;
 
 	if (!restore_wal)
 		return;
@@ -1058,18 +1059,21 @@ getRestoreCommand(const char *argv0)
 	 * Build a command able to retrieve the value of GUC parameter
 	 * restore_command, if set.
 	 */
-	if (config_file == NULL)
-	{
-		snprintf(postgres_cmd, sizeof(postgres_cmd),
-			 "\"%s\" -D \"%s\" -C restore_command",
-			 postgres_exec_path, datadir_target);
-	} else {
-		snprintf(postgres_cmd, sizeof(postgres_cmd),
-			 "\"%s\" -D \"%s\" --config_file=\"%s\" -C restore_command",
-			 postgres_exec_path, datadir_target, config_file);
-	}
+	postgres_cmd = createPQExpBuffer();
 
-	if (!pipe_read_line(postgres_cmd, cmd_output, sizeof(cmd_output)))
+	/* path to postgres, properly quoted */
+	appendShellString(postgres_cmd, postgres_exec_path);
+
+	appendPQExpBufferStr(postgres_cmd, " -D ");
+	appendShellString(postgres_cmd, datadir_target);
+	if (config_file != NULL)
+	{
+		appendPQExpBufferStr(postgres_cmd, " --config_file=");
+		appendShellString(postgres_cmd, config_file);
+	}
+	appendPQExpBufferStr(postgres_cmd, " -C restore_command");
+
+	if (!pipe_read_line(postgres_cmd->data, cmd_output, sizeof(cmd_output)))
 		exit(1);
 
 	(void) pg_strip_crlf(cmd_output);
