@@ -211,7 +211,6 @@ sub promote_standby
 sub run_pg_rewind_archive
 {
 	my $test_mode = shift;
-	my $restore_command;
 	my $primary_pgdata  = $node_primary->data_dir;
 
 	# Remove the existing archive directory and move all WAL
@@ -232,7 +231,7 @@ sub run_pg_rewind_archive
 	chmod(0700, $node_primary->data_dir . '/pg_wal');
 
 	# Add appropriate restore_command to the target cluster
-	$restore_command = $node_primary->enable_restoring($node_primary, 0);
+	$node_primary->enable_restoring($node_primary, 0);
 
 	# Stop the new primary and be ready to perform the rewind.
 	$node_standby->stop;

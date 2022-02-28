@@ -245,9 +245,10 @@ PostgreSQL documentation
       <term><option>--config-file=<replaceable class="parameter">filepath</replaceable></option></term>
       <listitem>
        <para>
-        In case the <filename>postgresql.conf</filename> of your target cluster is not in the 
-        target pgdata and you want to use the <option>-c / --restore-target-wal</option> option,
-        provide a (relative or absolute) path to the <filename>postgresql.conf</filename> using this option.
+        When using the <option>-c / --restore-target-wal</option> option, the <varname>restore_command</varname>
+        is extracted from the configuration of the target cluster. If the <filename>postgresql.conf</filename>
+	of that cluster is not in the target pgdata directory (or if you want to use an alternative config),
+        use this option to provide a (relative or absolute) path to the <filename>postgresql.conf</filename> to be used.
        </para>
       </listitem>
      </varlistentry>
