@@ -1025,7 +1025,7 @@ getRestoreCommand(const char *argv0)
 	int			rc;
 	char		postgres_exec_path[MAXPGPATH],
 				cmd_output[MAXPGPATH];
-	PQExpBuffer	postgres_cmd;
+	PQExpBuffer postgres_cmd;
 
 	if (!restore_wal)
 		return;
@@ -1064,6 +1064,7 @@ getRestoreCommand(const char *argv0)
 	/* path to postgres, properly quoted */
 	appendShellString(postgres_cmd, postgres_exec_path);
 
+	/* add -D switch, with properly quoted data directory */
 	appendPQExpBufferStr(postgres_cmd, " -D ");
 	appendShellString(postgres_cmd, datadir_target);
 	if (config_file != NULL)
@@ -1086,6 +1087,8 @@ getRestoreCommand(const char *argv0)
 
 	pg_log_debug("using for rewind restore_command = \'%s\'",
 				 restore_command);
+
+	destroyPQExpBuffer(postgres_cmd);
 }
 
 
@@ -1099,7 +1102,7 @@ ensureCleanShutdown(const char *argv0)
 	int			ret;
 #define MAXCMDLEN (2 * MAXPGPATH)
 	char		exec_path[MAXPGPATH];
-	PQExpBuffer	cmd;
+	PQExpBuffer postgres_cmd;
 
 	/* locate postgres binary */
 	if ((ret = find_other_exec(argv0, "postgres",
@@ -1138,23 +1141,31 @@ ensureCleanShutdown(const char *argv0)
 	 * fsync here.  This makes the recovery faster, and the target data folder
 	 * is synced at the end anyway.
 	 */
-	cmd = createPQExpBuffer();
-	appendShellString(cmd,exec_path);
-	appendPQExpBufferStr(cmd," --single -F -D ");
-	appendShellString(cmd, datadir_target);
+	postgres_cmd = createPQExpBuffer();
+
+	/* path to postgres, properly quoted */
+	appendShellString(postgres_cmd, exec_path);
+
+	/* add set of options with properly quoted data directory */
+	appendPQExpBufferStr(postgres_cmd, " --single -F -D ");
+	appendShellString(postgres_cmd, datadir_target);
 	if (config_file != NULL)
 	{
-		appendPQExpBufferStr(cmd, " --config_file=");
-		appendShellString(cmd, config_file);
+		appendPQExpBufferStr(postgres_cmd, " --config_file=");
+		appendShellString(postgres_cmd, config_file);
 	}
-	appendPQExpBufferStr(cmd," template1 < ");
-	appendShellString(cmd, DEVNULL);
-	
-	if (system(cmd->data) != 0)
+
+	/* finish with the database name, and a properly quoted redirection */
+	appendPQExpBufferStr(postgres_cmd, " template1 < ");
+	appendShellString(postgres_cmd, DEVNULL);
+
+	if (system(postgres_cmd->data) != 0)
 	{
 		pg_log_error("postgres single-user mode in target cluster failed");
-		pg_fatal("Command was: %s", cmd->data);
+		pg_fatal("Command was: %s", postgres_cmd->data);
 	}
+
+	destroyPQExpBuffer(postgres_cmd);
 }
 
 static void
