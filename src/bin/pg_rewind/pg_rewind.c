@@ -1071,6 +1071,7 @@ getRestoreCommand(const char *argv0)
 		appendPQExpBufferStr(postgres_cmd, " --config_file=");
 		appendShellString(postgres_cmd, config_file);
 	}
+	/* add -C switch, for restore_command */
 	appendPQExpBufferStr(postgres_cmd, " -C restore_command");
 
 	if (!pipe_read_line(postgres_cmd->data, cmd_output, sizeof(cmd_output)))
@@ -1098,7 +1099,7 @@ ensureCleanShutdown(const char *argv0)
 	int			ret;
 #define MAXCMDLEN (2 * MAXPGPATH)
 	char		exec_path[MAXPGPATH];
-	char		cmd[MAXCMDLEN];
+	PQExpBuffer	cmd;
 
 	/* locate postgres binary */
 	if ((ret = find_other_exec(argv0, "postgres",
@@ -1137,13 +1138,22 @@ ensureCleanShutdown(const char *argv0)
 	 * fsync here.  This makes the recovery faster, and the target data folder
 	 * is synced at the end anyway.
 	 */
-	snprintf(cmd, MAXCMDLEN, "\"%s\" --single -F -D \"%s\" template1 < \"%s\"",
-			 exec_path, datadir_target, DEVNULL);
-
-	if (system(cmd) != 0)
+	cmd = createPQExpBuffer();
+	appendShellString(cmd,exec_path);
+	appendPQExpBufferStr(cmd," --single -F -D ");
+	appendShellString(cmd, datadir_target);
+	if (config_file != NULL)
+	{
+		appendPQExpBufferStr(cmd, " --config_file=");
+		appendShellString(cmd, config_file);
+	}
+	appendPQExpBufferStr(cmd," template1 < ");
+	appendShellString(cmd, DEVNULL);
+	
+	if (system(cmd->data) != 0)
 	{
 		pg_log_error("postgres single-user mode in target cluster failed");
-		pg_fatal("Command was: %s", cmd);
+		pg_fatal("Command was: %s", cmd->data);
 	}
 }
 
