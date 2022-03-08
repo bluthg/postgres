@@ -289,7 +289,7 @@ SELECT attname
 	,compressattempts
 	,compresssuccesses
 	,compressedsize < originalsize AS compression_works
-	, total_time > 0 AS takes_time 
+	, total_time > 0 AS takes_time
 FROM pg_stat_toast WHERE relname = 'toast_test' ORDER BY attname;
  attname | storagemethod | externalized | compressmethod | compressattempts | compresssuccesses | compression_works | takes_time 
 ---------+---------------+--------------+----------------+------------------+-------------------+-------------------+------------

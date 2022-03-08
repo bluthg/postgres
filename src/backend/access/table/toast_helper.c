@@ -228,8 +228,8 @@ toast_tuple_find_biggest_attribute(ToastTupleContext *ttc,
 void
 toast_tuple_try_compression(ToastTupleContext *ttc, int attribute)
 {
-	Datum	*value = &ttc->ttc_values[attribute];
-	Datum	new_value;
+	Datum	   *value = &ttc->ttc_values[attribute];
+	Datum		new_value;
 	ToastAttrInfo *attr = &ttc->ttc_attr[attribute];
 	instr_time	start_time;
 

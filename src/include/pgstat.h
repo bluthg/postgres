@@ -1061,6 +1061,22 @@ typedef struct PgStat_StatSubEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatSubEntry;
 
+/* ----------
+ * PgStat_StatToastEntry			The collector's data per TOAST attribute
+ * ----------
+ */
+typedef struct PgStat_StatToastEntry
+{
+	PgStat_BackendAttrIdentifier t_id;
+	PgStat_Counter t_numexternalized;
+	PgStat_Counter t_numcompressed;
+	PgStat_Counter t_numcompressionsuccess;
+	uint64		   t_size_orig;
+	uint64		   t_size_compressed;
+	PgStat_Counter t_comp_time;	/* time in microseconds */
+} PgStat_StatToastEntry;
+
+
 /*
  * Working state needed to accumulate per-function-call timing statistics.
  */

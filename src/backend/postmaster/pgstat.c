@@ -344,7 +344,7 @@ static void pgstat_write_statsfiles(bool permanent, bool allDbs);
 static void pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent);
 static HTAB *pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep);
 static void pgstat_read_db_statsfile(Oid databaseid, HTAB *tabhash, HTAB *funchash, HTAB *toasthash,
-									 HTAB *subworkerhash, bool permanent);
+									 bool permanent);
 static void backend_read_statsfile(void);
 
 static bool pgstat_write_statsfile_needed(void);
@@ -1414,74 +1414,6 @@ pgstat_vacuum_stat(void)
 
 		hash_destroy(htab);
 	}
-
-	/*
-	 * Repeat for subscription workers.  Similarly, we needn't bother in the
-	 * common case where no subscription workers' stats are being collected.
-	 */
-	if (dbentry->subworkers != NULL &&
-		hash_get_num_entries(dbentry->subworkers) > 0)
-	{
-		PgStat_StatSubWorkerEntry *subwentry;
-		PgStat_MsgSubscriptionPurge spmsg;
-
-		/*
-		 * Read pg_subscription and make a list of OIDs of all existing
-		 * subscriptions
-		 */
-		htab = pgstat_collect_oids(SubscriptionRelationId, Anum_pg_subscription_oid);
-
-		spmsg.m_databaseid = MyDatabaseId;
-		spmsg.m_nentries = 0;
-
-		hash_seq_init(&hstat, dbentry->subworkers);
-		while ((subwentry = (PgStat_StatSubWorkerEntry *) hash_seq_search(&hstat)) != NULL)
-		{
-			bool		exists = false;
-			Oid			subid = subwentry->key.subid;
-
-			CHECK_FOR_INTERRUPTS();
-
-			if (hash_search(htab, (void *) &subid, HASH_FIND, NULL) != NULL)
-				continue;
-
-			/*
-			 * It is possible that we have multiple entries for the
-			 * subscription corresponding to apply worker and tablesync
-			 * workers. In such cases, we don't need to add the same subid
-			 * again.
-			 */
-			for (int i = 0; i < spmsg.m_nentries; i++)
-			{
-				if (spmsg.m_subids[i] == subid)
-				{
-					exists = true;
-					break;
-				}
-			}
-
-			if (exists)
-				continue;
-
-			/* This subscription is dead, add the subid to the message */
-			spmsg.m_subids[spmsg.m_nentries++] = subid;
-
-			/*
-			 * If the message is full, send it out and reinitialize to empty
-			 */
-			if (spmsg.m_nentries >= PGSTAT_NUM_SUBSCRIPTIONPURGE)
-			{
-				pgstat_send_subscription_purge(&spmsg);
-				spmsg.m_nentries = 0;
-			}
-		}
-
-		/* Send the rest of dead subscriptions */
-		if (spmsg.m_nentries > 0)
-			pgstat_send_subscription_purge(&spmsg);
-
-		hash_destroy(htab);
-	}
 }
 
 
@@ -1665,7 +1597,6 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	msg.m_databaseid = MyDatabaseId;
 	msg.m_resettype = type;
 	msg.m_objectid = objoid;
-
 
 	pgstat_send(&msg, sizeof(msg));
 }
@@ -3178,36 +3109,6 @@ pgstat_fetch_stat_funcentry(Oid func_id)
 	return funcentry;
 }
 
-/*
- * ---------
- * pgstat_fetch_stat_subworker_entry() -
- *
- *	Support function for the SQL-callable pgstat* functions. Returns
- *	the collected statistics for subscription worker or NULL.
- * ---------
- */
-PgStat_StatSubWorkerEntry *
-pgstat_fetch_stat_subworker_entry(Oid subid, Oid subrelid)
-{
-	PgStat_StatDBEntry *dbentry;
-	PgStat_StatSubWorkerEntry *wentry = NULL;
-
-	/* Load the stats file if needed */
-	backend_read_statsfile();
-
-	/*
-	 * Lookup our database, then find the requested subscription worker stats.
-	 */
-	dbentry = pgstat_fetch_stat_dbentry(MyDatabaseId);
-	if (dbentry != NULL && dbentry->subworkers != NULL)
-	{
-		wentry = pgstat_get_subworker_entry(dbentry, subid, subrelid,
-											false);
-	}
-
-	return wentry;
-}
-
 /* ----------
  * pgstat_fetch_stat_toastentry() -
  *
@@ -4366,6 +4267,7 @@ pgstat_write_db_statsfile(PgStat_StatDBEntry *dbentry, bool permanent)
 	HASH_SEQ_STATUS ostat;
 	PgStat_StatTabEntry *tabentry;
 	PgStat_StatFuncEntry *funcentry;
+	PgStat_StatToastEntry *toastentry;
 	FILE	   *fpout;
 	int32		format_id;
 	Oid			dbid = dbentry->databaseid;
@@ -4723,6 +4625,7 @@ pgstat_read_statsfiles(Oid onlydb, bool permanent, bool deep)
 					pgstat_read_db_statsfile(dbentry->databaseid,
 											 dbentry->tables,
 											 dbentry->functions,
+											 dbentry->toastactivity,
 											 permanent);
 
 				break;
@@ -5725,7 +5628,6 @@ pgstat_recv_resetcounter(PgStat_MsgResetcounter *msg, int len)
 		hash_destroy(dbentry->functions);
 	if (dbentry->toastactivity != NULL)
 		hash_destroy(dbentry->toastactivity);
-
 	dbentry->tables = NULL;
 	dbentry->functions = NULL;
 	dbentry->toastactivity = NULL;
@@ -6385,6 +6287,60 @@ pgstat_recv_funcpurge(PgStat_MsgFuncpurge *msg, int len)
 		(void) hash_search(dbentry->functions,
 						   (void *) &(msg->m_functionid[i]),
 						   HASH_REMOVE, NULL);
+	}
+}
+
+/* ----------
+ * pgstat_recv_toaststat() -
+ *
+ *	Count what the backend has done.
+ * ----------
+ */
+static void
+pgstat_recv_toaststat(PgStat_MsgToaststat *msg, int len)
+{
+	PgStat_ToastEntry *toastmsg = &(msg->m_entry[0]);
+	PgStat_StatDBEntry *dbentry;
+	PgStat_StatToastEntry *toastentry;
+	int			i;
+	bool		found;
+
+	dbentry = pgstat_get_db_entry(msg->m_databaseid, true);
+
+	/*
+	 * Process all TOAST entries in the message.
+	 */
+	for (i = 0; i < msg->m_nentries; i++, toastmsg++)
+	{
+		toastentry = (PgStat_StatToastEntry *) hash_search(dbentry->toastactivity,
+														 (void *) &(toastmsg->attr),
+														 HASH_ENTER, &found);
+
+		if (!found)
+		{
+			/*
+			 * If it's a new entry, initialize counters to the values
+			 * we just got.
+			 */
+			toastentry->t_numexternalized = toastmsg->t_numexternalized;
+			toastentry->t_numcompressed = toastmsg->t_numcompressed;
+			toastentry->t_numcompressionsuccess = toastmsg->t_numcompressionsuccess;
+			toastentry->t_size_orig = toastmsg->t_size_orig;
+			toastentry->t_size_compressed = toastmsg->t_size_compressed;
+			toastentry->t_comp_time = toastmsg->t_comp_time;
+		}
+		else
+		{
+			/*
+			 * Otherwise add the values to the existing entry.
+			 */
+			toastentry->t_numexternalized += toastmsg->t_numexternalized;
+			toastentry->t_numcompressed += toastmsg->t_numcompressed;
+			toastentry->t_numcompressionsuccess += toastmsg->t_numcompressionsuccess;
+			toastentry->t_size_orig += toastmsg->t_size_orig;
+			toastentry->t_size_compressed += toastmsg->t_size_compressed;
+			toastentry->t_comp_time += toastmsg->t_comp_time;
+		}
 	}
 }
 
