@@ -2,7 +2,7 @@
  *
  * pg_waldump.c - decode and display WAL
  *
- * Copyright (c) 2013-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2013-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_waldump/pg_waldump.c
@@ -222,15 +222,12 @@ search_directory(const char *directory, const char *fname)
 									 WalSegSz),
 							fname, WalSegSz);
 		}
+		else if (r < 0)
+			fatal_error("could not read file \"%s\": %m",
+						fname);
 		else
-		{
-			if (errno != 0)
-				fatal_error("could not read file \"%s\": %m",
-							fname);
-			else
-				fatal_error("could not read file \"%s\": read %d of %d",
-							fname, r, XLOG_BLCKSZ);
-		}
+			fatal_error("could not read file \"%s\": read %d of %d",
+						fname, r, XLOG_BLCKSZ);
 		close(fd);
 		return true;
 	}

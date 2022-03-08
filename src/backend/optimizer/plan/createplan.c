@@ -5,7 +5,7 @@
  *	  Planning is complete, we just need to convert the selected
  *	  Path into a Plan.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -912,6 +912,22 @@ use_physical_tlist(PlannerInfo *root, Path *path, int flags)
 		if (bms_nonempty_difference(phinfo->ph_needed, rel->relids) &&
 			bms_is_subset(phinfo->ph_eval_at, rel->relids))
 			return false;
+	}
+
+	/*
+	 * For an index-only scan, the "physical tlist" is the index's indextlist.
+	 * We can only return that without a projection if all the index's columns
+	 * are returnable.
+	 */
+	if (path->pathtype == T_IndexOnlyScan)
+	{
+		IndexOptInfo *indexinfo = ((IndexPath *) path)->indexinfo;
+
+		for (i = 0; i < indexinfo->ncolumns; i++)
+		{
+			if (!indexinfo->canreturn[i])
+				return false;
+		}
 	}
 
 	/*

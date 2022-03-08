@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
@@ -8,7 +8,7 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 
 use Fcntl qw(:seek);
-use Test::More tests => 272;
+use Test::More;
 
 my ($node, $result);
 
@@ -283,3 +283,5 @@ sub check_all_options_uncorrupted
 		}
 	}
 }
+
+done_testing();

@@ -2,7 +2,7 @@
  * worker.c
  *	   PostgreSQL logical replication worker (apply)
  *
- * Copyright (c) 2016-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logical/worker.c
@@ -179,6 +179,7 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "tcop/tcopprot.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
 #include "utils/dynahash.h"
@@ -189,6 +190,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/rls.h"
 #include "utils/syscache.h"
 #include "utils/timeout.h"
 
@@ -224,7 +226,8 @@ typedef struct ApplyErrorCallbackArg
 	/* Remote node information */
 	int			remote_attnum;	/* -1 if invalid */
 	TransactionId remote_xid;
-	TimestampTz ts;				/* commit, rollback, or prepare timestamp */
+	XLogRecPtr	finish_lsn;
+	char	   *origin_name;
 } ApplyErrorCallbackArg;
 
 static ApplyErrorCallbackArg apply_error_callback_arg =
@@ -233,7 +236,8 @@ static ApplyErrorCallbackArg apply_error_callback_arg =
 	.rel = NULL,
 	.remote_attnum = -1,
 	.remote_xid = InvalidTransactionId,
-	.ts = 0,
+	.finish_lsn = InvalidXLogRecPtr,
+	.origin_name = NULL,
 };
 
 static MemoryContext ApplyMessageContext = NULL;
@@ -332,7 +336,7 @@ static void apply_spooled_messages(TransactionId xid, XLogRecPtr lsn);
 
 /* Functions for apply error callback */
 static void apply_error_callback(void *arg);
-static inline void set_apply_error_context_xact(TransactionId xid, TimestampTz ts);
+static inline void set_apply_error_context_xact(TransactionId xid, XLogRecPtr lsn);
 static inline void reset_apply_error_context_info(void);
 
 /*
@@ -785,7 +789,7 @@ apply_handle_begin(StringInfo s)
 	LogicalRepBeginData begin_data;
 
 	logicalrep_read_begin(s, &begin_data);
-	set_apply_error_context_xact(begin_data.xid, begin_data.committime);
+	set_apply_error_context_xact(begin_data.xid, begin_data.final_lsn);
 
 	remote_final_lsn = begin_data.final_lsn;
 
@@ -837,7 +841,7 @@ apply_handle_begin_prepare(StringInfo s)
 				 errmsg_internal("tablesync worker received a BEGIN PREPARE message")));
 
 	logicalrep_read_begin_prepare(s, &begin_data);
-	set_apply_error_context_xact(begin_data.xid, begin_data.prepare_time);
+	set_apply_error_context_xact(begin_data.xid, begin_data.prepare_lsn);
 
 	remote_final_lsn = begin_data.prepare_lsn;
 
@@ -936,7 +940,7 @@ apply_handle_commit_prepared(StringInfo s)
 	char		gid[GIDSIZE];
 
 	logicalrep_read_commit_prepared(s, &prepare_data);
-	set_apply_error_context_xact(prepare_data.xid, prepare_data.commit_time);
+	set_apply_error_context_xact(prepare_data.xid, prepare_data.commit_lsn);
 
 	/* Compute GID for two_phase transactions. */
 	TwoPhaseTransactionGid(MySubscription->oid, prepare_data.xid,
@@ -977,7 +981,7 @@ apply_handle_rollback_prepared(StringInfo s)
 	char		gid[GIDSIZE];
 
 	logicalrep_read_rollback_prepared(s, &rollback_data);
-	set_apply_error_context_xact(rollback_data.xid, rollback_data.rollback_time);
+	set_apply_error_context_xact(rollback_data.xid, rollback_data.rollback_end_lsn);
 
 	/* Compute GID for two_phase transactions. */
 	TwoPhaseTransactionGid(MySubscription->oid, rollback_data.xid,
@@ -1042,7 +1046,7 @@ apply_handle_stream_prepare(StringInfo s)
 				 errmsg_internal("tablesync worker received a STREAM PREPARE message")));
 
 	logicalrep_read_stream_prepare(s, &prepare_data);
-	set_apply_error_context_xact(prepare_data.xid, prepare_data.prepare_time);
+	set_apply_error_context_xact(prepare_data.xid, prepare_data.prepare_lsn);
 
 	elog(DEBUG1, "received prepare for streamed transaction %u", prepare_data.xid);
 
@@ -1124,7 +1128,7 @@ apply_handle_stream_start(StringInfo s)
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg_internal("invalid transaction ID in streamed replication transaction")));
 
-	set_apply_error_context_xact(stream_xid, 0);
+	set_apply_error_context_xact(stream_xid, InvalidXLogRecPtr);
 
 	/*
 	 * Initialize the worker's stream_fileset if we haven't yet. This will be
@@ -1213,7 +1217,7 @@ apply_handle_stream_abort(StringInfo s)
 	 */
 	if (xid == subxid)
 	{
-		set_apply_error_context_xact(xid, 0);
+		set_apply_error_context_xact(xid, InvalidXLogRecPtr);
 		stream_cleanup_files(MyLogicalRepWorker->subid, xid);
 	}
 	else
@@ -1239,7 +1243,7 @@ apply_handle_stream_abort(StringInfo s)
 		bool		found = false;
 		char		path[MAXPGPATH];
 
-		set_apply_error_context_xact(subxid, 0);
+		set_apply_error_context_xact(subxid, InvalidXLogRecPtr);
 
 		subidx = -1;
 		begin_replication_step();
@@ -1424,7 +1428,7 @@ apply_handle_stream_commit(StringInfo s)
 				 errmsg_internal("STREAM COMMIT message without STREAM STOP")));
 
 	xid = logicalrep_read_stream_commit(s, &commit_data);
-	set_apply_error_context_xact(xid, commit_data.committime);
+	set_apply_error_context_xact(xid, commit_data.commit_lsn);
 
 	elog(DEBUG1, "received commit for streamed transaction %u", xid);
 
@@ -1531,6 +1535,38 @@ GetRelationIdentityOrPK(Relation rel)
 }
 
 /*
+ * Check that we (the subscription owner) have sufficient privileges on the
+ * target relation to perform the given operation.
+ */
+static void
+TargetPrivilegesCheck(Relation rel, AclMode mode)
+{
+	Oid				relid;
+	AclResult		aclresult;
+
+	relid = RelationGetRelid(rel);
+	aclresult = pg_class_aclcheck(relid, GetUserId(), mode);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult,
+					   get_relkind_objtype(rel->rd_rel->relkind),
+					   get_rel_name(relid));
+
+	/*
+	 * We lack the infrastructure to honor RLS policies.  It might be possible
+	 * to add such infrastructure here, but tablesync workers lack it, too, so
+	 * we don't bother.  RLS does not ordinarily apply to TRUNCATE commands,
+	 * but it seems dangerous to replicate a TRUNCATE and then refuse to
+	 * replicate subsequent INSERTs, so we forbid all commands the same.
+	 */
+	if (check_enable_rls(relid, InvalidOid, false) == RLS_ENABLED)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("\"%s\" cannot replicate into relation with row-level security enabled: \"%s\"",
+						GetUserNameFromId(GetUserId(), true),
+						RelationGetRelationName(rel))));
+}
+
+/*
  * Handle INSERT message.
  */
 
@@ -1613,6 +1649,7 @@ apply_handle_insert_internal(ApplyExecutionData *edata,
 	ExecOpenIndices(relinfo, false);
 
 	/* Do the insert. */
+	TargetPrivilegesCheck(relinfo->ri_RelationDesc, ACL_INSERT);
 	ExecSimpleRelationInsert(relinfo, estate, remoteslot);
 
 	/* Cleanup. */
@@ -1796,6 +1833,7 @@ apply_handle_update_internal(ApplyExecutionData *edata,
 		EvalPlanQualSetSlot(&epqstate, remoteslot);
 
 		/* Do the actual update. */
+		TargetPrivilegesCheck(relinfo->ri_RelationDesc, ACL_UPDATE);
 		ExecSimpleRelationUpdate(relinfo, estate, &epqstate, localslot,
 								 remoteslot);
 	}
@@ -1917,6 +1955,7 @@ apply_handle_delete_internal(ApplyExecutionData *edata,
 		EvalPlanQualSetSlot(&epqstate, localslot);
 
 		/* Do the actual delete. */
+		TargetPrivilegesCheck(relinfo->ri_RelationDesc, ACL_DELETE);
 		ExecSimpleRelationDelete(relinfo, estate, &epqstate, localslot);
 	}
 	else
@@ -1953,6 +1992,12 @@ FindReplTupleInLocalRel(EState *estate, Relation localrel,
 {
 	Oid			idxoid;
 	bool		found;
+
+	/*
+	 * Regardless of the top-level operation, we're performing a read here, so
+	 * check for SELECT privileges.
+	 */
+	TargetPrivilegesCheck(localrel, ACL_SELECT);
 
 	*localslot = table_slot_create(localrel, &estate->es_tupleTable);
 
@@ -2110,6 +2155,8 @@ apply_handle_tuple_routing(ApplyExecutionData *edata,
 					ExecOpenIndices(partrelinfo, false);
 
 					EvalPlanQualSetSlot(&epqstate, remoteslot_part);
+					TargetPrivilegesCheck(partrelinfo->ri_RelationDesc,
+										  ACL_UPDATE);
 					ExecSimpleRelationUpdate(partrelinfo, estate, &epqstate,
 											 localslot, remoteslot_part);
 					ExecCloseIndices(partrelinfo);
@@ -2236,6 +2283,7 @@ apply_handle_truncate(StringInfo s)
 		}
 
 		remote_rels = lappend(remote_rels, rel);
+		TargetPrivilegesCheck(rel->localrel, ACL_TRUNCATE);
 		rels = lappend(rels, rel->localrel);
 		relids = lappend_oid(relids, rel->localreloid);
 		if (RelationIsLogicallyLogged(rel->localrel))
@@ -2273,6 +2321,7 @@ apply_handle_truncate(StringInfo s)
 					continue;
 				}
 
+				TargetPrivilegesCheck(childrel, ACL_TRUNCATE);
 				rels = lappend(rels, childrel);
 				part_rels = lappend(part_rels, childrel);
 				relids = lappend_oid(relids, childrelid);
@@ -2321,7 +2370,7 @@ apply_dispatch(StringInfo s)
 
 	/*
 	 * Set the current command being applied. Since this function can be
-	 * called recusively when applying spooled changes, save the current
+	 * called recursively when applying spooled changes, save the current
 	 * command.
 	 */
 	saved_command = apply_error_callback_arg.command;
@@ -2540,8 +2589,8 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 	pgstat_report_activity(STATE_IDLE, NULL);
 
 	/*
-	 * Push apply error context callback. Fields will be filled during
-	 * applying a change.
+	 * Push apply error context callback. Fields will be filled while applying
+	 * a change.
 	 */
 	errcallback.callback = apply_error_callback;
 	errcallback.previous = error_context_stack;
@@ -2886,10 +2935,7 @@ maybe_reread_subscription(void)
 		proc_exit(0);
 	}
 
-	/*
-	 * Exit if the subscription was disabled. This normally should not happen
-	 * as the worker gets killed during ALTER SUBSCRIPTION ... DISABLE.
-	 */
+	/* Exit if the subscription was disabled. */
 	if (!newsub->enabled)
 	{
 		ereport(LOG,
@@ -2915,6 +2961,7 @@ maybe_reread_subscription(void)
 		strcmp(newsub->slotname, MySubscription->slotname) != 0 ||
 		newsub->binary != MySubscription->binary ||
 		newsub->stream != MySubscription->stream ||
+		newsub->owner != MySubscription->owner ||
 		!equal(newsub->publications, MySubscription->publications))
 	{
 		ereport(LOG,
@@ -3332,7 +3379,6 @@ void
 ApplyWorkerMain(Datum main_arg)
 {
 	int			worker_slot = DatumGetInt32(main_arg);
-	MemoryContext cctx = CurrentMemoryContext;
 	MemoryContext oldctx;
 	char		originname[NAMEDATALEN];
 	XLogRecPtr	origin_startpos;
@@ -3440,20 +3486,15 @@ ApplyWorkerMain(Datum main_arg)
 		}
 		PG_CATCH();
 		{
-			MemoryContext ecxt = MemoryContextSwitchTo(cctx);
-			ErrorData  *errdata = CopyErrorData();
-
 			/*
-			 * Report the table sync error. There is no corresponding message
-			 * type for table synchronization.
+			 * Abort the current transaction so that we send the stats message
+			 * in an idle state.
 			 */
-			pgstat_report_subworker_error(MyLogicalRepWorker->subid,
-										  MyLogicalRepWorker->relid,
-										  MyLogicalRepWorker->relid,
-										  0,	/* message type */
-										  InvalidTransactionId,
-										  errdata->message);
-			MemoryContextSwitchTo(ecxt);
+			AbortOutOfAnyTransaction();
+
+			/* Report the worker failed during table synchronization */
+			pgstat_report_subscription_error(MySubscription->oid, false);
+
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -3462,6 +3503,17 @@ ApplyWorkerMain(Datum main_arg)
 		myslotname = MemoryContextStrdup(ApplyContext, syncslotname);
 
 		pfree(syncslotname);
+
+		/*
+		 * Allocate the origin name in long-lived context for error context
+		 * message.
+		 */
+		ReplicationOriginNameForTablesync(MySubscription->oid,
+										  MyLogicalRepWorker->relid,
+										  originname,
+										  sizeof(originname));
+		apply_error_callback_arg.origin_name = MemoryContextStrdup(ApplyContext,
+																   originname);
 	}
 	else
 	{
@@ -3505,6 +3557,13 @@ ApplyWorkerMain(Datum main_arg)
 		 * does some initializations on the upstream so let's still call it.
 		 */
 		(void) walrcv_identify_system(LogRepWorkerWalRcvConn, &startpointTLI);
+
+		/*
+		 * Allocate the origin name in long-lived context for error context
+		 * message.
+		 */
+		apply_error_callback_arg.origin_name = MemoryContextStrdup(ApplyContext,
+																   originname);
 	}
 
 	/*
@@ -3560,7 +3619,7 @@ ApplyWorkerMain(Datum main_arg)
 		}
 
 		ereport(DEBUG1,
-				(errmsg("logical replication apply worker for subscription \"%s\" two_phase is %s.",
+				(errmsg("logical replication apply worker for subscription \"%s\" two_phase is %s",
 						MySubscription->name,
 						MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_DISABLED ? "DISABLED" :
 						MySubscription->twophasestate == LOGICALREP_TWOPHASE_STATE_PENDING ? "PENDING" :
@@ -3580,22 +3639,14 @@ ApplyWorkerMain(Datum main_arg)
 	}
 	PG_CATCH();
 	{
-		/* report the apply error */
-		if (apply_error_callback_arg.command != 0)
-		{
-			MemoryContext ecxt = MemoryContextSwitchTo(cctx);
-			ErrorData  *errdata = CopyErrorData();
+		/*
+		 * Abort the current transaction so that we send the stats message in
+		 * an idle state.
+		 */
+		AbortOutOfAnyTransaction();
 
-			pgstat_report_subworker_error(MyLogicalRepWorker->subid,
-										  MyLogicalRepWorker->relid,
-										  apply_error_callback_arg.rel != NULL
-										  ? apply_error_callback_arg.rel->localreloid
-										  : InvalidOid,
-										  apply_error_callback_arg.command,
-										  apply_error_callback_arg.remote_xid,
-										  errdata->message);
-			MemoryContextSwitchTo(ecxt);
-		}
+		/* Report the worker failed while applying changes */
+		pgstat_report_subscription_error(MySubscription->oid, !am_tablesync_worker());
 
 		PG_RE_THROW();
 	}
@@ -3617,46 +3668,56 @@ IsLogicalWorker(void)
 static void
 apply_error_callback(void *arg)
 {
-	StringInfoData buf;
 	ApplyErrorCallbackArg *errarg = &apply_error_callback_arg;
 
 	if (apply_error_callback_arg.command == 0)
 		return;
 
-	initStringInfo(&buf);
-	appendStringInfo(&buf, _("processing remote data during \"%s\""),
-					 logicalrep_message_type(errarg->command));
+	Assert(errarg->origin_name);
 
-	/* append relation information */
-	if (errarg->rel)
+	if (errarg->rel == NULL)
 	{
-		appendStringInfo(&buf, _(" for replication target relation \"%s.%s\""),
-						 errarg->rel->remoterel.nspname,
-						 errarg->rel->remoterel.relname);
-		if (errarg->remote_attnum >= 0)
-			appendStringInfo(&buf, _(" column \"%s\""),
-							 errarg->rel->remoterel.attnames[errarg->remote_attnum]);
+		if (!TransactionIdIsValid(errarg->remote_xid))
+			errcontext("processing remote data for replication origin \"%s\" during \"%s\"",
+					   errarg->origin_name,
+					   logicalrep_message_type(errarg->command));
+		else if (XLogRecPtrIsInvalid(errarg->finish_lsn))
+			errcontext("processing remote data for replication origin \"%s\" during \"%s\" in transaction %u",
+					   errarg->origin_name,
+					   logicalrep_message_type(errarg->command),
+					   errarg->remote_xid);
+		else
+			errcontext("processing remote data for replication origin \"%s\" during \"%s\" in transaction %u finished at %X/%X",
+					   errarg->origin_name,
+					   logicalrep_message_type(errarg->command),
+					   errarg->remote_xid,
+					   LSN_FORMAT_ARGS(errarg->finish_lsn));
 	}
-
-	/* append transaction information */
-	if (TransactionIdIsNormal(errarg->remote_xid))
-	{
-		appendStringInfo(&buf, _(" in transaction %u"), errarg->remote_xid);
-		if (errarg->ts != 0)
-			appendStringInfo(&buf, _(" at %s"),
-							 timestamptz_to_str(errarg->ts));
-	}
-
-	errcontext("%s", buf.data);
-	pfree(buf.data);
+	else if (errarg->remote_attnum < 0)
+		errcontext("processing remote data for replication origin \"%s\" during \"%s\" for replication target relation \"%s.%s\" in transaction %u finished at %X/%X",
+				   errarg->origin_name,
+				   logicalrep_message_type(errarg->command),
+				   errarg->rel->remoterel.nspname,
+				   errarg->rel->remoterel.relname,
+				   errarg->remote_xid,
+				   LSN_FORMAT_ARGS(errarg->finish_lsn));
+	else
+		errcontext("processing remote data for replication origin \"%s\" during \"%s\" for replication target relation \"%s.%s\" column \"%s\" in transaction %u finished at %X/%X",
+				   errarg->origin_name,
+				   logicalrep_message_type(errarg->command),
+				   errarg->rel->remoterel.nspname,
+				   errarg->rel->remoterel.relname,
+				   errarg->rel->remoterel.attnames[errarg->remote_attnum],
+				   errarg->remote_xid,
+				   LSN_FORMAT_ARGS(errarg->finish_lsn));
 }
 
 /* Set transaction information of apply error callback */
 static inline void
-set_apply_error_context_xact(TransactionId xid, TimestampTz ts)
+set_apply_error_context_xact(TransactionId xid, XLogRecPtr lsn)
 {
 	apply_error_callback_arg.remote_xid = xid;
-	apply_error_callback_arg.ts = ts;
+	apply_error_callback_arg.finish_lsn = lsn;
 }
 
 /* Reset all information of apply error callback */
@@ -3666,5 +3727,5 @@ reset_apply_error_context_info(void)
 	apply_error_callback_arg.command = 0;
 	apply_error_callback_arg.rel = NULL;
 	apply_error_callback_arg.remote_attnum = -1;
-	set_apply_error_context_xact(InvalidTransactionId, 0);
+	set_apply_error_context_xact(InvalidTransactionId, InvalidXLogRecPtr);
 }

@@ -1,12 +1,12 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
 
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 3;
+use Test::More;
 
 my $tempdir       = PostgreSQL::Test::Utils::tempdir;
 
@@ -36,3 +36,5 @@ command_fails_like(
 command_ok(
 	[ "pg_dump", '-p', $port, '-a', '--include-foreign-data=s2', 'postgres' ],
 	"dump foreign server with no tables");
+
+done_testing();

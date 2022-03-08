@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
@@ -7,7 +7,7 @@ use warnings;
 use Config;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 82;
+use Test::More;
 
 my $tempdir       = PostgreSQL::Test::Utils::tempdir;
 
@@ -188,3 +188,5 @@ command_fails_like(
 	qr/\Qpg_dumpall: error: option --exclude-database cannot be used together with -g\/--globals-only\E/,
 	'pg_dumpall: option --exclude-database cannot be used together with -g/--globals-only'
 );
+
+done_testing();

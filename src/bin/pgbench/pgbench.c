@@ -5,7 +5,7 @@
  * Originally written by Tatsuo Ishii and enhanced by many contributors.
  *
  * src/bin/pgbench/pgbench.c
- * Copyright (c) 2000-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2022, PostgreSQL Global Development Group
  * ALL RIGHTS RESERVED;
  *
  * Permission to use, copy, modify, and distribute this software and its
@@ -787,8 +787,8 @@ is_an_int(const char *str)
 /*
  * strtoint64 -- convert a string to 64-bit integer
  *
- * This function is a slightly modified version of scanint8() from
- * src/backend/utils/adt/int8.c.
+ * This function is a slightly modified version of pg_strtoint64() from
+ * src/backend/utils/adt/numutils.c.
  *
  * The function returns whether the conversion worked, and if so
  * "*result" is set to the result.
@@ -5598,11 +5598,11 @@ printResults(StatsData *total,
 		return;
 
 	if (throttle_delay && latency_limit)
-		printf("number of transactions skipped: " INT64_FORMAT " (%.3f %%)\n",
+		printf("number of transactions skipped: " INT64_FORMAT " (%.3f%%)\n",
 			   total->skipped, 100.0 * total->skipped / total->cnt);
 
 	if (latency_limit)
-		printf("number of transactions above the %.1f ms latency limit: " INT64_FORMAT "/" INT64_FORMAT " (%.3f %%)\n",
+		printf("number of transactions above the %.1f ms latency limit: " INT64_FORMAT "/" INT64_FORMAT " (%.3f%%)\n",
 			   latency_limit / 1000.0, latency_late, ntx,
 			   (ntx > 0) ? 100.0 * latency_late / ntx : 0.0);
 

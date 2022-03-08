@@ -3,7 +3,7 @@
  * pg_proc.c
  *	  routines to support manipulation of the pg_proc relation
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -947,7 +947,7 @@ fmgr_sql_validator(PG_FUNCTION_ARGS)
 					RawStmt    *parsetree = lfirst_node(RawStmt, lc);
 					List	   *querytree_sublist;
 
-					querytree_sublist = pg_analyze_and_rewrite_params(parsetree,
+					querytree_sublist = pg_analyze_and_rewrite_withcb(parsetree,
 																	  prosrc,
 																	  (ParserSetupHook) sql_fn_parser_setup,
 																	  pinfo,

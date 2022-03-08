@@ -8,7 +8,7 @@
  * None of this code is used during normal system operation.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlogutils.c
@@ -20,7 +20,7 @@
 #include <unistd.h>
 
 #include "access/timeline.h"
-#include "access/xlog.h"
+#include "access/xlogrecovery.h"
 #include "access/xlog_internal.h"
 #include "access/xlogutils.h"
 #include "miscadmin.h"
@@ -46,8 +46,8 @@ bool		ignore_invalid_pages = false;
  * process you're running in, use RecoveryInProgress() but only after shared
  * memory startup and lock initialization.
  *
- * This is updated from xlog.c, but lives here because it's mostly read by
- * WAL redo functions.
+ * This is updated from xlog.c and xlogrecovery.c, but lives here because
+ * it's mostly read by WAL redo functions.
  */
 bool		InRecovery = false;
 

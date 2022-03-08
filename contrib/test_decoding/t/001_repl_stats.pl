@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Test replication statistics data in pg_stat_replication_slots is sane after
 # drop replication slot and restart.
@@ -8,7 +8,7 @@ use warnings;
 use File::Path qw(rmtree);
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 2;
+use Test::More;
 
 # Test set-up
 my $node = PostgreSQL::Test::Cluster->new('test');
@@ -118,3 +118,5 @@ $node->safe_psql('postgres',
 
 # shutdown
 $node->stop;
+
+done_testing();

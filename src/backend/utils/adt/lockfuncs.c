@@ -3,7 +3,7 @@
  * lockfuncs.c
  *		Functions for SQL access to various lock-manager capabilities.
  *
- * Copyright (c) 2002-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/backend/utils/adt/lockfuncs.c
@@ -559,13 +559,14 @@ pg_safe_snapshot_blocking_pids(PG_FUNCTION_ARGS)
 	int		   *blockers;
 	int			num_blockers;
 	Datum	   *blocker_datums;
+	int			max_backends = GetMaxBackends();
 
 	/* A buffer big enough for any possible blocker list without truncation */
-	blockers = (int *) palloc(MaxBackends * sizeof(int));
+	blockers = (int *) palloc(max_backends * sizeof(int));
 
 	/* Collect a snapshot of processes waited for by GetSafeSnapshot */
 	num_blockers =
-		GetSafeSnapshotBlockingPids(blocked_pid, blockers, MaxBackends);
+		GetSafeSnapshotBlockingPids(blocked_pid, blockers, max_backends);
 
 	/* Convert int array to Datum array */
 	if (num_blockers > 0)

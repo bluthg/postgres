@@ -21,7 +21,7 @@
  *	for a particular range index.  Offsets are counted starting from the end of
  *	flags aligned to the bound type.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -38,6 +38,7 @@
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "port/pg_bitutils.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rangetypes.h"
@@ -2772,7 +2773,7 @@ hash_multirange(PG_FUNCTION_ARGS)
 		/* Merge hashes of flags and bounds */
 		range_hash = hash_uint32((uint32) flags);
 		range_hash ^= lower_hash;
-		range_hash = (range_hash << 1) | (range_hash >> 31);
+		range_hash = pg_rotate_left32(range_hash, 1);
 		range_hash ^= upper_hash;
 
 		/*

@@ -37,7 +37,7 @@
  * record, wait for it to be replicated to the standby, and then exit.
  *
  *
- * Portions Copyright (c) 2010-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/walsender.c
@@ -55,6 +55,7 @@
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogreader.h"
+#include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
@@ -1630,7 +1631,8 @@ exec_replication_command(const char *cmd_string)
 	 */
 	if (MyWalSnd->state == WALSNDSTATE_STOPPING)
 		ereport(ERROR,
-				(errmsg("cannot execute new commands while WAL sender is in stopping mode")));
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot execute new commands while WAL sender is in stopping mode")));
 
 	/*
 	 * CREATE_REPLICATION_SLOT ... LOGICAL exports a snapshot until the next
@@ -1641,7 +1643,7 @@ exec_replication_command(const char *cmd_string)
 	CHECK_FOR_INTERRUPTS();
 
 	/*
-	 * Parse the command.
+	 * Prepare to parse and execute the command.
 	 */
 	cmd_context = AllocSetContextCreate(CurrentMemoryContext,
 										"Replication command context",
@@ -1649,6 +1651,31 @@ exec_replication_command(const char *cmd_string)
 	old_context = MemoryContextSwitchTo(cmd_context);
 
 	replication_scanner_init(cmd_string);
+
+	/*
+	 * Is it a WalSender command?
+	 */
+	if (!replication_scanner_is_replication_command())
+	{
+		/* Nope; clean up and get out. */
+		replication_scanner_finish();
+
+		MemoryContextSwitchTo(old_context);
+		MemoryContextDelete(cmd_context);
+
+		/* XXX this is a pretty random place to make this check */
+		if (MyDatabaseId == InvalidOid)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot execute SQL commands in WAL sender for physical replication")));
+
+		/* Tell the caller that this wasn't a WalSender command. */
+		return false;
+	}
+
+	/*
+	 * Looks like a WalSender command, so parse it.
+	 */
 	parse_rc = replication_yyparse();
 	if (parse_rc != 0)
 		ereport(ERROR,
@@ -1658,23 +1685,6 @@ exec_replication_command(const char *cmd_string)
 	replication_scanner_finish();
 
 	cmd_node = replication_parse_result;
-
-	/*
-	 * If it's a SQL command, just clean up our mess and return false; the
-	 * caller will take care of executing it.
-	 */
-	if (IsA(cmd_node, SQLCmd))
-	{
-		if (MyDatabaseId == InvalidOid)
-			ereport(ERROR,
-					(errmsg("cannot execute SQL commands in WAL sender for physical replication")));
-
-		MemoryContextSwitchTo(old_context);
-		MemoryContextDelete(cmd_context);
-
-		/* Tell the caller that this wasn't a WalSender command. */
-		return false;
-	}
 
 	/*
 	 * Report query to various monitoring facilities.  For this purpose, we
@@ -3393,37 +3403,11 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 {
 #define PG_STAT_GET_WAL_SENDERS_COLS	12
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
 	SyncRepStandbyData *sync_standbys;
 	int			num_standbys;
 	int			i;
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
-
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
+	SetSingleFuncCall(fcinfo, 0);
 
 	/*
 	 * Get the currently active synchronous standbys.  This could be out of
@@ -3567,11 +3551,9 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 				values[11] = TimestampTzGetDatum(replyTime);
 		}
 
-		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
 	}
-
-	/* clean up and return the tuplestore */
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }

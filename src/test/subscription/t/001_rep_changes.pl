@@ -1,12 +1,12 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Basic logical replication test
 use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 32;
+use Test::More;
 
 # Initialize publisher node
 my $node_publisher = PostgreSQL::Test::Cluster->new('publisher');
@@ -537,3 +537,5 @@ ROLLBACK;
 ok( $reterr =~
 	  m/WARNING:  wal_level is insufficient to publish logical changes/,
 	'CREATE PUBLICATION while wal_level=minimal');
+
+done_testing();

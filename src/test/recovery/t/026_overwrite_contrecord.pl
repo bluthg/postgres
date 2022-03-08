@@ -1,4 +1,4 @@
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Tests for already-propagated WAL segments ending in incomplete WAL records.
 
@@ -9,8 +9,6 @@ use FindBin;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
-
-plan tests => 3;
 
 # Test: Create a physical replica that's missing the last WAL file,
 # then restart the primary to create a divergent WAL file and observe
@@ -104,3 +102,5 @@ like(
 
 $node->stop;
 $node_standby->stop;
+
+done_testing();

@@ -1,12 +1,12 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # test for archiving with hot standby
 use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 7;
+use Test::More;
 use File::Copy;
 
 # Initialize primary node, doing archives
@@ -120,3 +120,5 @@ like(
 	$log_contents,
 	qr/WARNING:.*recovery_end_command/s,
 	"recovery_end_command failure detected in logs after promotion");
+
+done_testing();

@@ -3,7 +3,7 @@
  *	  functions related to auxiliary processes.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -116,7 +116,7 @@ AuxiliaryProcessMain(AuxProcType auxtype)
 	 * This will need rethinking if we ever want more than one of a particular
 	 * auxiliary process type.
 	 */
-	ProcSignalInit(MaxBackends + MyAuxProcType + 1);
+	ProcSignalInit(GetMaxBackends() + MyAuxProcType + 1);
 
 	/*
 	 * Auxiliary processes don't run transactions, but they may need a

@@ -5,7 +5,7 @@
  *	  commands.  At one time acted as an interface between the Lisp and C
  *	  systems.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -136,6 +136,7 @@ ClassifyUtilityCommandAsReadOnly(Node *parsetree)
 	switch (nodeTag(parsetree))
 	{
 		case T_AlterCollationStmt:
+		case T_AlterDatabaseRefreshCollStmt:
 		case T_AlterDatabaseSetStmt:
 		case T_AlterDatabaseStmt:
 		case T_AlterDefaultPrivilegesStmt:
@@ -777,6 +778,11 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 		case T_AlterDatabaseStmt:
 			/* no event triggers for global objects */
 			AlterDatabase(pstate, (AlterDatabaseStmt *) parsetree, isTopLevel);
+			break;
+
+		case T_AlterDatabaseRefreshCollStmt:
+			/* no event triggers for global objects */
+			AlterDatabaseRefreshColl((AlterDatabaseRefreshCollStmt *) parsetree);
 			break;
 
 		case T_AlterDatabaseSetStmt:
@@ -2801,9 +2807,7 @@ CreateCommandTag(Node *parsetree)
 			break;
 
 		case T_AlterDatabaseStmt:
-			tag = CMDTAG_ALTER_DATABASE;
-			break;
-
+		case T_AlterDatabaseRefreshCollStmt:
 		case T_AlterDatabaseSetStmt:
 			tag = CMDTAG_ALTER_DATABASE;
 			break;
@@ -3444,9 +3448,7 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_AlterDatabaseStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
+		case T_AlterDatabaseRefreshCollStmt:
 		case T_AlterDatabaseSetStmt:
 			lev = LOGSTMT_DDL;
 			break;

@@ -3,7 +3,7 @@
  * nbtutils.c
  *	  Utility code for Postgres btree implementation.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -164,6 +164,13 @@ _bt_mkscankey(Relation rel, IndexTuple itup)
 		if (null)
 			key->anynullkeys = true;
 	}
+
+	/*
+	 * In NULLS NOT DISTINCT mode, we pretend that there are no null keys, so
+	 * that full uniqueness check is done.
+	 */
+	if (rel->rd_index->indnullsnotdistinct)
+		key->anynullkeys = false;
 
 	return key;
 }
@@ -2065,7 +2072,7 @@ BTreeShmemSize(void)
 	Size		size;
 
 	size = offsetof(BTVacInfo, vacuums);
-	size = add_size(size, mul_size(MaxBackends, sizeof(BTOneVacInfo)));
+	size = add_size(size, mul_size(GetMaxBackends(), sizeof(BTOneVacInfo)));
 	return size;
 }
 
@@ -2094,7 +2101,7 @@ BTreeShmemInit(void)
 		btvacinfo->cycle_ctr = (BTCycleId) time(NULL);
 
 		btvacinfo->num_vacuums = 0;
-		btvacinfo->max_vacuums = MaxBackends;
+		btvacinfo->max_vacuums = GetMaxBackends();
 	}
 	else
 		Assert(found);

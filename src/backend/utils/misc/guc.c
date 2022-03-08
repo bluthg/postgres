@@ -6,7 +6,7 @@
  * See src/backend/utils/misc/README for more information.
  *
  *
- * Copyright (c) 2000-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2022, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
  *
  * IDENTIFICATION
@@ -41,11 +41,13 @@
 #include "access/twophase.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
+#include "access/xlogrecovery.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "catalog/storage.h"
 #include "commands/async.h"
 #include "commands/prepare.h"
+#include "commands/tablespace.h"
 #include "commands/trigger.h"
 #include "commands/user.h"
 #include "commands/vacuum.h"
@@ -147,6 +149,8 @@ extern bool optimize_bounded_sort;
 #endif
 
 static int	GUC_check_errcode_value;
+
+static List *reserved_class_prefix = NIL;
 
 /* global variables for check hook support */
 char	   *GUC_check_errmsg_string;
@@ -410,6 +414,7 @@ static const struct config_enum_entry backslash_quote_options[] = {
  */
 static const struct config_enum_entry compute_query_id_options[] = {
 	{"auto", COMPUTE_QUERY_ID_AUTO, false},
+	{"regress", COMPUTE_QUERY_ID_REGRESS, false},
 	{"on", COMPUTE_QUERY_ID_ON, false},
 	{"off", COMPUTE_QUERY_ID_OFF, false},
 	{"true", COMPUTE_QUERY_ID_ON, true},
@@ -1966,6 +1971,17 @@ static struct config_bool ConfigureNamesBool[] =
 			GUC_NOT_IN_SAMPLE
 		},
 		&IgnoreSystemIndexes,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"allow_in_place_tablespaces", PGC_SUSET, DEVELOPER_OPTIONS,
+			gettext_noop("Allows tablespaces directly inside pg_tblspc, for testing."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&allow_in_place_tablespaces,
 		false,
 		NULL, NULL, NULL
 	},
@@ -3758,7 +3774,7 @@ static struct config_real ConfigureNamesReal[] =
 			GUC_EXPLAIN
 		},
 		&hash_mem_multiplier,
-		1.0, 1.0, 1000.0,
+		2.0, 1.0, 1000.0,
 		NULL, NULL, NULL
 	},
 
@@ -3878,11 +3894,21 @@ static struct config_string ConfigureNamesString[] =
 	{
 		{"archive_command", PGC_SIGHUP, WAL_ARCHIVING,
 			gettext_noop("Sets the shell command that will be called to archive a WAL file."),
-			NULL
+			gettext_noop("This is used only if \"archive_library\" is not set.")
 		},
 		&XLogArchiveCommand,
 		"",
 		NULL, NULL, show_archive_command
+	},
+
+	{
+		{"archive_library", PGC_SIGHUP, WAL_ARCHIVING,
+			gettext_noop("Sets the library that will be called to archive a WAL file."),
+			gettext_noop("An empty string indicates that \"archive_command\" should be used.")
+		},
+		&XLogArchiveLibrary,
+		"",
+		NULL, NULL, NULL
 	},
 
 	{
@@ -4273,7 +4299,7 @@ static struct config_string ConfigureNamesString[] =
 		{"log_destination", PGC_SIGHUP, LOGGING_WHERE,
 			gettext_noop("Sets the destination for server log output."),
 			gettext_noop("Valid values are combinations of \"stderr\", "
-						 "\"syslog\", \"csvlog\", and \"eventlog\", "
+						 "\"syslog\", \"csvlog\", \"jsonlog\" and \"eventlog\", "
 						 "depending on the platform."),
 			GUC_LIST_INPUT
 		},
@@ -5457,13 +5483,13 @@ valid_custom_variable_name(const char *name)
 			name_start = true;
 		}
 		else if (strchr("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-						"abcdefghijklmnopqrstuvwxyz", *p) != NULL ||
+						"abcdefghijklmnopqrstuvwxyz_", *p) != NULL ||
 				 IS_HIGHBIT_SET(*p))
 		{
 			/* okay as first or non-first character */
 			name_start = false;
 		}
-		else if (!name_start && strchr("0123456789_$", *p) != NULL)
+		else if (!name_start && strchr("0123456789$", *p) != NULL)
 			 /* okay as non-first character */ ;
 		else
 			return false;
@@ -5576,18 +5602,44 @@ find_option(const char *name, bool create_placeholders, bool skip_errors,
 		 * doesn't contain a separator, don't assume that it was meant to be a
 		 * placeholder.
 		 */
-		if (strchr(name, GUC_QUALIFIER_SEPARATOR) != NULL)
+		const char *sep = strchr(name, GUC_QUALIFIER_SEPARATOR);
+
+		if (sep != NULL)
 		{
-			if (valid_custom_variable_name(name))
-				return add_placeholder_variable(name, elevel);
-			/* A special error message seems desirable here */
-			if (!skip_errors)
-				ereport(elevel,
-						(errcode(ERRCODE_INVALID_NAME),
-						 errmsg("invalid configuration parameter name \"%s\"",
-								name),
-						 errdetail("Custom parameter names must be two or more simple identifiers separated by dots.")));
-			return NULL;
+			size_t		classLen = sep - name;
+			ListCell   *lc;
+
+			/* The name must be syntactically acceptable ... */
+			if (!valid_custom_variable_name(name))
+			{
+				if (!skip_errors)
+					ereport(elevel,
+							(errcode(ERRCODE_INVALID_NAME),
+							 errmsg("invalid configuration parameter name \"%s\"",
+									name),
+							 errdetail("Custom parameter names must be two or more simple identifiers separated by dots.")));
+				return NULL;
+			}
+			/* ... and it must not match any previously-reserved prefix */
+			foreach(lc, reserved_class_prefix)
+			{
+				const char *rcprefix = lfirst(lc);
+
+				if (strlen(rcprefix) == classLen &&
+					strncmp(name, rcprefix, classLen) == 0)
+				{
+					if (!skip_errors)
+						ereport(elevel,
+								(errcode(ERRCODE_INVALID_NAME),
+								 errmsg("invalid configuration parameter name \"%s\"",
+										name),
+								 errdetail("\"%s\" is a reserved prefix.",
+										   rcprefix)));
+					return NULL;
+				}
+			}
+			/* OK, create it */
+			return add_placeholder_variable(name, elevel);
 		}
 	}
 
@@ -8341,7 +8393,7 @@ flatten_set_variable_args(const char *name, List *args)
 				break;
 			case T_Float:
 				/* represented as a string, so just copy it */
-				appendStringInfoString(&buf, castNode(Float, &con->val)->val);
+				appendStringInfoString(&buf, castNode(Float, &con->val)->fval);
 				break;
 			case T_String:
 				val = strVal(&con->val);
@@ -9341,15 +9393,26 @@ DefineCustomEnumVariable(const char *name,
 }
 
 /*
+ * Mark the given GUC prefix as "reserved".
+ *
+ * This deletes any existing placeholders matching the prefix,
+ * and then prevents new ones from being created.
  * Extensions should call this after they've defined all of their custom
  * GUCs, to help catch misspelled config-file entries.
  */
 void
-EmitWarningsOnPlaceholders(const char *className)
+MarkGUCPrefixReserved(const char *className)
 {
 	int			classLen = strlen(className);
 	int			i;
+	MemoryContext oldcontext;
 
+	/*
+	 * Check for existing placeholders.  We must actually remove invalid
+	 * placeholders, else future parallel worker startups will fail.  (We
+	 * don't bother trying to free associated memory, since this shouldn't
+	 * happen often.)
+	 */
 	for (i = 0; i < num_guc_variables; i++)
 	{
 		struct config_generic *var = guc_variables[i];
@@ -9359,11 +9422,21 @@ EmitWarningsOnPlaceholders(const char *className)
 			var->name[classLen] == GUC_QUALIFIER_SEPARATOR)
 		{
 			ereport(WARNING,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("unrecognized configuration parameter \"%s\"",
-							var->name)));
+					(errcode(ERRCODE_INVALID_NAME),
+					 errmsg("invalid configuration parameter name \"%s\", removing it",
+							var->name),
+					 errdetail("\"%s\" is now a reserved prefix.",
+							   className)));
+			num_guc_variables--;
+			memmove(&guc_variables[i], &guc_variables[i + 1],
+					(num_guc_variables - i) * sizeof(struct config_generic *));
 		}
 	}
+
+	/* And remember the name so we can prevent future mistakes. */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	reserved_class_prefix = lappend(reserved_class_prefix, pstrdup(className));
+	MemoryContextSwitchTo(oldcontext);
 }
 
 
@@ -9629,6 +9702,45 @@ GetConfigOptionByName(const char *name, const char **varname, bool missing_ok)
 		*varname = record->name;
 
 	return _ShowOption(record, true);
+}
+
+/*
+ * Return some of the flags associated to the specified GUC in the shape of
+ * a text array, and NULL if it does not exist.  An empty array is returned
+ * if the GUC exists without any meaningful flags to show.
+ */
+Datum
+pg_settings_get_flags(PG_FUNCTION_ARGS)
+{
+#define MAX_GUC_FLAGS	5
+	char	   *varname = TextDatumGetCString(PG_GETARG_DATUM(0));
+	struct config_generic *record;
+	int			cnt = 0;
+	Datum		flags[MAX_GUC_FLAGS];
+	ArrayType  *a;
+
+	record = find_option(varname, false, true, ERROR);
+
+	/* return NULL if no such variable */
+	if (record == NULL)
+		PG_RETURN_NULL();
+
+	if (record->flags & GUC_EXPLAIN)
+		flags[cnt++] = CStringGetTextDatum("EXPLAIN");
+	if (record->flags & GUC_NO_RESET_ALL)
+		flags[cnt++] = CStringGetTextDatum("NO_RESET_ALL");
+	if (record->flags & GUC_NO_SHOW_ALL)
+		flags[cnt++] = CStringGetTextDatum("NO_SHOW_ALL");
+	if (record->flags & GUC_NOT_IN_SAMPLE)
+		flags[cnt++] = CStringGetTextDatum("NOT_IN_SAMPLE");
+	if (record->flags & GUC_RUNTIME_COMPUTED)
+		flags[cnt++] = CStringGetTextDatum("RUNTIME_COMPUTED");
+
+	Assert(cnt <= MAX_GUC_FLAGS);
+
+	/* Returns the record as Datum */
+	a = construct_array(flags, cnt, TEXTOID, -1, false, TYPALIGN_INT);
+	PG_RETURN_ARRAYTYPE_P(a);
 }
 
 /*
@@ -10054,55 +10166,14 @@ show_all_file_settings(PG_FUNCTION_ARGS)
 {
 #define NUM_PG_FILE_SETTINGS_ATTS 7
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
 	ConfigVariable *conf;
 	int			seqno;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
-
-	/* Check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
 
 	/* Scan the config files using current context as workspace */
 	conf = ProcessConfigFileInternal(PGC_SIGHUP, false, DEBUG3);
 
-	/* Switch into long-lived context to construct returned data structures */
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	/* Build a tuple descriptor for our result type */
-	tupdesc = CreateTemplateTupleDesc(NUM_PG_FILE_SETTINGS_ATTS);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "sourcefile",
-					   TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "sourceline",
-					   INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "seqno",
-					   INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "name",
-					   TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "setting",
-					   TEXTOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 6, "applied",
-					   BOOLOID, -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 7, "error",
-					   TEXTOID, -1, 0);
-
 	/* Build a tuplestore to return our results in */
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	/* The rest can be done in short-lived context */
-	MemoryContextSwitchTo(oldcontext);
+	SetSingleFuncCall(fcinfo, 0);
 
 	/* Process the results and create a tuplestore */
 	for (seqno = 1; conf != NULL; conf = conf->next, seqno++)
@@ -10150,10 +10221,8 @@ show_all_file_settings(PG_FUNCTION_ARGS)
 			nulls[6] = true;
 
 		/* shove row into tuplestore */
-		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
-
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }
@@ -11749,6 +11818,8 @@ check_log_destination(char **newval, void **extra, GucSource source)
 			newlogdest |= LOG_DESTINATION_STDERR;
 		else if (pg_strcasecmp(tok, "csvlog") == 0)
 			newlogdest |= LOG_DESTINATION_CSVLOG;
+		else if (pg_strcasecmp(tok, "jsonlog") == 0)
+			newlogdest |= LOG_DESTINATION_JSONLOG;
 #ifdef HAVE_SYSLOG
 		else if (pg_strcasecmp(tok, "syslog") == 0)
 			newlogdest |= LOG_DESTINATION_SYSLOG;
@@ -12138,14 +12209,11 @@ check_huge_page_size(int *newval, void **extra, GucSource source)
 static bool
 check_client_connection_check_interval(int *newval, void **extra, GucSource source)
 {
-#ifndef POLLRDHUP
-	/* Linux only, for now.  See pq_check_connection(). */
-	if (*newval != 0)
+	if (!WaitEventSetCanReportClosed() && *newval != 0)
 	{
-		GUC_check_errdetail("client_connection_check_interval must be set to 0 on platforms that lack POLLRDHUP.");
+		GUC_check_errdetail("client_connection_check_interval must be set to 0 on this platform");
 		return false;
 	}
-#endif
 	return true;
 }
 

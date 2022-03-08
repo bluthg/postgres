@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 package Mkvcbuild;
 
@@ -106,7 +106,7 @@ sub mkvcbuild
 	  pread.c preadv.c pwrite.c pwritev.c pg_bitutils.c
 	  pg_strong_random.c pgcheckdir.c pgmkdirp.c pgsleep.c pgstrcasecmp.c
 	  pqsignal.c mkdtemp.c qsort.c qsort_arg.c bsearch_arg.c quotes.c system.c
-	  strerror.c tar.c thread.c
+	  strerror.c tar.c
 	  win32env.c win32error.c win32ntdll.c
 	  win32security.c win32setlocale.c win32stat.c);
 
@@ -377,7 +377,9 @@ sub mkvcbuild
 	# This list of files has to match BBOBJS in pg_basebackup's Makefile.
 	$pgbasebackup->AddFile('src/bin/pg_basebackup/pg_basebackup.c');
 	$pgbasebackup->AddFile('src/bin/pg_basebackup/bbstreamer_file.c');
+	$pgbasebackup->AddFile('src/bin/pg_basebackup/bbstreamer_gzip.c');
 	$pgbasebackup->AddFile('src/bin/pg_basebackup/bbstreamer_inject.c');
+	$pgbasebackup->AddFile('src/bin/pg_basebackup/bbstreamer_lz4.c');
 	$pgbasebackup->AddFile('src/bin/pg_basebackup/bbstreamer_tar.c');
 	$pgbasebackup->AddLibrary('ws2_32.lib');
 
@@ -488,6 +490,10 @@ sub mkvcbuild
 		  if (!(defined($pyprefix) && defined($pyver)));
 
 		my $pymajorver = substr($pyver, 0, 1);
+
+		die "Python version $pyver is too old (version 3 or later is required)"
+		  if int($pymajorver) < 3;
+
 		my $plpython = $solution->AddProject('plpython' . $pymajorver,
 			'dll', 'PLs', 'src/pl/plpython');
 		$plpython->AddIncludeDir($pyprefix . '/include');
