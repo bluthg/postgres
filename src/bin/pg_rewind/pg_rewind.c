@@ -1075,6 +1075,7 @@ getRestoreCommand(const char *argv0)
 		appendPQExpBufferStr(postgres_cmd, " --config_file=");
 		appendShellString(postgres_cmd, config_file);
 	}
+
 	/* add -C switch, for restore_command */
 	appendPQExpBufferStr(postgres_cmd, " -C restore_command");
 
