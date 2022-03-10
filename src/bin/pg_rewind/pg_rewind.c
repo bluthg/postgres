@@ -88,7 +88,8 @@ usage(const char *progname)
 	printf(_("Options:\n"));
 	printf(_("  -c, --restore-target-wal       use restore_command in target configuration to\n"
 			 "                                 retrieve WAL files from archives\n"));
-	printf(_("      --config-file=FILE         path to postgresql.conf if outside target-pgdata (for -c)\n"));
+	printf(_("      --config-file=FILE         path to postgresql.conf if it resides outside\n"));
+	printf(_("                                 the target data directory (for -c)\n"));
 	printf(_("  -D, --target-pgdata=DIRECTORY  existing data directory to modify\n"));
 	printf(_("      --source-pgdata=DIRECTORY  source data directory to synchronize with\n"));
 	printf(_("      --source-server=CONNSTR    source server to synchronize with\n"));
@@ -116,14 +117,14 @@ main(int argc, char **argv)
 		{"write-recovery-conf", no_argument, NULL, 'R'},
 		{"source-pgdata", required_argument, NULL, 1},
 		{"source-server", required_argument, NULL, 2},
+		{"debug", no_argument, NULL, 3},
 		{"no-ensure-shutdown", no_argument, NULL, 4},
+		{"config-file", required_argument, NULL, 5},
 		{"version", no_argument, NULL, 'V'},
 		{"restore-target-wal", no_argument, NULL, 'c'},
 		{"dry-run", no_argument, NULL, 'n'},
 		{"no-sync", no_argument, NULL, 'N'},
 		{"progress", no_argument, NULL, 'P'},
-		{"debug", no_argument, NULL, 3},
-		{"config-file", required_argument, NULL, 5},
 		{NULL, 0, NULL, 0}
 	};
 	int			option_index;
@@ -1067,6 +1068,8 @@ getRestoreCommand(const char *argv0)
 	/* add -D switch, with properly quoted data directory */
 	appendPQExpBufferStr(postgres_cmd, " -D ");
 	appendShellString(postgres_cmd, datadir_target);
+
+	/* add --config_file switch only if requested */
 	if (config_file != NULL)
 	{
 		appendPQExpBufferStr(postgres_cmd, " --config_file=");
@@ -1149,6 +1152,8 @@ ensureCleanShutdown(const char *argv0)
 	/* add set of options with properly quoted data directory */
 	appendPQExpBufferStr(postgres_cmd, " --single -F -D ");
 	appendShellString(postgres_cmd, datadir_target);
+
+	/* add --config_file switch only if requested */
 	if (config_file != NULL)
 	{
 		appendPQExpBufferStr(postgres_cmd, " --config_file=");
