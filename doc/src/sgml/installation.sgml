@@ -41,7 +41,7 @@ make
 su
 make install
 adduser postgres
-mkdir /usr/local/pgsql/data
+mkdir -p /usr/local/pgsql/data
 chown postgres /usr/local/pgsql/data
 su - postgres
 /usr/local/pgsql/bin/initdb -D /usr/local/pgsql/data
@@ -267,6 +267,14 @@ su - postgres
       You need <productname>LZ4</productname>, if you want to support
       compression of data with this method; see
       <xref linkend="guc-default-toast-compression"/> and
+      <xref linkend="guc-wal-compression"/>.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      You need <productname>zstd</productname>, if you want to support
+      compression of data with this method; see
       <xref linkend="guc-wal-compression"/>.
      </para>
     </listitem>

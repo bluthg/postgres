@@ -21,7 +21,7 @@
 #include "catalog/pg_type_d.h"
 #include "pgstat.h"
 
-extern PGDLLIMPORT bool pgstat_track_toast;
+PGDLLIMPORT bool pgstat_track_toast;
 
 /*
  * Prepare to TOAST a tuple.
