@@ -20,14 +20,6 @@
 #include "utils/pgstat_internal.h"
 #include "utils/timestamp.h"
 
-
-/* ----------
- * GUC parameters
- * ----------
-bool		pgstat_track_toast = false;
- */
-
-
 /*
  * Indicates if backend has some function stats that it hasn't yet
  * sent to the collector.
