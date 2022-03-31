@@ -257,4 +257,9 @@ SELECT externalized=0 AS main_doesnt_externalize FROM pg_stat_toast WHERE relnam
 DROP TABLE toast_test;
 SELECT count(*) FROM pg_stat_toast WHERE relname = 'toast_test';
 
+-- ensure that stats accessors handle NULL input correctly
+SELECT pg_stat_get_replication_slot(NULL);
+SELECT pg_stat_get_subscription_stats(NULL);
+
+
 -- End of Stats Test
