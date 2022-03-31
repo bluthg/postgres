@@ -281,19 +281,6 @@ SELECT pg_stat_get_tuples_hot_updated('brin_hot'::regclass::oid);
 
 DROP TABLE brin_hot;
 DROP FUNCTION wait_for_hot_stats();
--- ensure that stats accessors handle NULL input correctly
-SELECT pg_stat_get_replication_slot(NULL);
- pg_stat_get_replication_slot 
-------------------------------
- 
-(1 row)
-
-SELECT pg_stat_get_subscription_stats(NULL);
- pg_stat_get_subscription_stats 
---------------------------------
- 
-(1 row)
-
 -- now check that the track_toast stuff worked:
 SELECT attname
 	,storagemethod
@@ -328,6 +315,19 @@ SELECT count(*) FROM pg_stat_toast WHERE relname = 'toast_test';
  count 
 -------
      0
+(1 row)
+
+-- ensure that stats accessors handle NULL input correctly
+SELECT pg_stat_get_replication_slot(NULL);
+ pg_stat_get_replication_slot 
+------------------------------
+ 
+(1 row)
+
+SELECT pg_stat_get_subscription_stats(NULL);
+ pg_stat_get_subscription_stats 
+--------------------------------
+ 
 (1 row)
 
 -- End of Stats Test
