@@ -4093,7 +4093,7 @@ transformJsonExprCommon(ParseState *pstate, JsonFuncExpr *func)
 	Node	   *pathspec;
 	JsonFormatType format;
 
-	if (func->common->pathname)
+	if (func->common->pathname && func->op != JSON_TABLE_OP)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("JSON_TABLE path name is not allowed here"),
@@ -4131,14 +4131,19 @@ transformJsonExprCommon(ParseState *pstate, JsonFuncExpr *func)
 	transformJsonPassingArgs(pstate, format, func->common->passing,
 							 &jsexpr->passing_values, &jsexpr->passing_names);
 
-	if (func->op != JSON_EXISTS_OP)
+	if (func->op != JSON_EXISTS_OP && func->op != JSON_TABLE_OP)
 		jsexpr->on_empty = transformJsonBehavior(pstate, func->on_empty,
 												 JSON_BEHAVIOR_NULL);
 
-	jsexpr->on_error = transformJsonBehavior(pstate, func->on_error,
-											 func->op == JSON_EXISTS_OP ?
-											 JSON_BEHAVIOR_FALSE :
-											 JSON_BEHAVIOR_NULL);
+	if (func->op == JSON_EXISTS_OP)
+		jsexpr->on_error = transformJsonBehavior(pstate, func->on_error,
+												 JSON_BEHAVIOR_FALSE);
+	else if (func->op == JSON_TABLE_OP)
+		jsexpr->on_error = transformJsonBehavior(pstate, func->on_error,
+												 JSON_BEHAVIOR_EMPTY);
+	else
+		jsexpr->on_error = transformJsonBehavior(pstate, func->on_error,
+												 JSON_BEHAVIOR_NULL);
 
 	return jsexpr;
 }
@@ -4251,7 +4256,7 @@ transformJsonFuncExprOutput(ParseState *pstate,	JsonFuncExpr *func,
 }
 
 /*
- * Coerce a expression in JSON DEFAULT behavior to the target output type.
+ * Coerce an expression in JSON DEFAULT behavior to the target output type.
  */
 static Node *
 coerceDefaultJsonExpr(ParseState *pstate, JsonExpr *jsexpr, Node *defexpr)
@@ -4439,6 +4444,21 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 					jsexpr->result_coercion->expr = NULL;
 			}
 			break;
+
+		case JSON_TABLE_OP:
+			jsexpr->returning = makeNode(JsonReturning);
+			jsexpr->returning->format = makeJsonFormat(JS_FORMAT_DEFAULT, JS_ENC_DEFAULT, -1);
+			jsexpr->returning->typid = exprType(contextItemExpr);
+			jsexpr->returning->typmod = -1;
+
+			if (jsexpr->returning->typid != JSONBOID)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("JSON_TABLE() is not yet implemented for json type"),
+						 errhint("Try casting the argument to jsonb"),
+						 parser_errposition(pstate, func->location)));
+
+			break;
 	}
 
 	if (exprType(contextItemExpr) != JSONBOID)
@@ -4450,18 +4470,47 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 	return (Node *) jsexpr;
 }
 
+static JsonReturning *
+transformJsonConstructorRet(ParseState *pstate, JsonOutput *output, const char *fname)
+{
+	JsonReturning *returning;
+
+	if (output)
+	{
+		returning = transformJsonOutput(pstate, output, false);
+
+		Assert(OidIsValid(returning->typid));
+
+		if (returning->typid != JSONOID && returning->typid != JSONBOID)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("cannot use RETURNING type %s in %s",
+							format_type_be(returning->typid), fname),
+					 parser_errposition(pstate, output->typeName->location)));
+	}
+	else
+	{
+		Oid			targettype = JSONOID;
+		JsonFormatType format = JS_FORMAT_JSON;
+
+		returning = makeNode(JsonReturning);
+		returning->format = makeJsonFormat(format, JS_ENC_DEFAULT, -1);
+		returning->typid = targettype;
+		returning->typmod = -1;
+	}
+
+	return returning;
+}
+
 /*
  * Transform a JSON() expression.
  */
 static Node *
 transformJsonParseExpr(ParseState *pstate, JsonParseExpr *jsexpr)
 {
-	JsonReturning *returning = makeNode(JsonReturning);
+	JsonReturning *returning = transformJsonConstructorRet(pstate, jsexpr->output,
+													"JSON()");
 	Node	   *arg;
-
-	returning->format = makeJsonFormat(JS_FORMAT_JSON, JS_ENC_DEFAULT, -1);
-	returning->typid = JSONOID;
-	returning->typmod = -1;
 
 	if (jsexpr->unique_keys)
 	{
@@ -4502,12 +4551,9 @@ transformJsonParseExpr(ParseState *pstate, JsonParseExpr *jsexpr)
 static Node *
 transformJsonScalarExpr(ParseState *pstate, JsonScalarExpr *jsexpr)
 {
-	JsonReturning *returning = makeNode(JsonReturning);
 	Node	   *arg = transformExprRecurse(pstate, (Node *) jsexpr->expr);
-
-	returning->format = makeJsonFormat(JS_FORMAT_JSON, JS_ENC_DEFAULT, -1);
-	returning->typid = JSONOID;
-	returning->typmod = -1;
+	JsonReturning *returning = transformJsonConstructorRet(pstate, jsexpr->output,
+													"JSON_SCALAR()");
 
 	if (exprType(arg) == UNKNOWNOID)
 		arg = coerce_to_specific_type(pstate, arg, TEXTOID, "JSON_SCALAR");
