@@ -7953,9 +7953,9 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         <para>
         Be aware that this feature, depending on the amount of TOASTable columns in
         your databases, may significantly increase the size of the statistics files
-        and the workload of the statistics collector. It is recommended to only
-        temporarily activate this to assess the right compression and storage method
-        for a column.
+        and the workload of the statistics collector. If your databases have a very high 
+        amount of TOASTable colums, it is recommended to only temporarily activate this
+        setting to assess the right compression and storage method for a column.
         </para>
        </note>
       </listitem>
