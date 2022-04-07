@@ -596,6 +596,7 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 							   Anum_pg_subscription_oid);
 	values[Anum_pg_subscription_oid - 1] = ObjectIdGetDatum(subid);
 	values[Anum_pg_subscription_subdbid - 1] = ObjectIdGetDatum(MyDatabaseId);
+	values[Anum_pg_subscription_subskiplsn - 1] = LSNGetDatum(InvalidXLogRecPtr);
 	values[Anum_pg_subscription_subname - 1] =
 		DirectFunctionCall1(namein, CStringGetDatum(stmt->subname));
 	values[Anum_pg_subscription_subowner - 1] = ObjectIdGetDatum(owner);
@@ -607,7 +608,6 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 					 LOGICALREP_TWOPHASE_STATE_PENDING :
 					 LOGICALREP_TWOPHASE_STATE_DISABLED);
 	values[Anum_pg_subscription_subdisableonerr - 1] = BoolGetDatum(opts.disableonerr);
-	values[Anum_pg_subscription_subskiplsn - 1] = LSNGetDatum(InvalidXLogRecPtr);
 	values[Anum_pg_subscription_subconninfo - 1] =
 		CStringGetTextDatum(conninfo);
 	if (opts.slot_name)
@@ -737,6 +737,8 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 						"ALTER SUBSCRIPTION ... REFRESH PUBLICATION")));
 
 	table_close(rel, RowExclusiveLock);
+
+	pgstat_create_subscription(subid);
 
 	if (opts.enabled)
 		ApplyLauncherWakeupAtCommit();
@@ -1409,7 +1411,7 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 	 * slot stays dropped even if the transaction rolls back.  So we cannot
 	 * run DROP SUBSCRIPTION inside a transaction block if dropping the
 	 * replication slot.  Also, in this case, we report a message for dropping
-	 * the subscription to the stats collector.
+	 * the subscription to the cumulative stats system.
 	 *
 	 * XXX The command name should really be something like "DROP SUBSCRIPTION
 	 * of a subscription that is associated with a replication slot", but we
@@ -1583,7 +1585,7 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 	PG_END_TRY();
 
 	/*
-	 * Send a message for dropping this subscription to the stats collector.
+	 * Tell the cumulative stats system that the subscription is getting dropped.
 	 * We can safely report dropping the subscription statistics here if the
 	 * subscription is associated with a replication slot since we cannot run
 	 * DROP SUBSCRIPTION inside a transaction block.  Subscription statistics
@@ -1592,7 +1594,7 @@ DropSubscription(DropSubscriptionStmt *stmt, bool isTopLevel)
 	 * gets lost.
 	 */
 	if (slotname)
-		pgstat_report_subscription_drop(subid);
+		pgstat_drop_subscription(subid);
 
 	table_close(rel, NoLock);
 }

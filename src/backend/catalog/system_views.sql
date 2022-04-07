@@ -930,6 +930,20 @@ CREATE VIEW pg_stat_wal_receiver AS
     FROM pg_stat_get_wal_receiver() s
     WHERE s.pid IS NOT NULL;
 
+CREATE VIEW pg_stat_recovery_prefetch AS
+    SELECT
+            s.stats_reset,
+            s.prefetch,
+            s.hit,
+            s.skip_init,
+            s.skip_new,
+            s.skip_fpw,
+            s.skip_rep,
+            s.wal_distance,
+            s.block_distance,
+            s.io_depth
+     FROM pg_stat_get_recovery_prefetch() s;
+
 CREATE VIEW pg_stat_subscription AS
     SELECT
             su.oid AS subid,
@@ -1305,8 +1319,8 @@ REVOKE ALL ON pg_replication_origin_status FROM public;
 
 -- All columns of pg_subscription except subconninfo are publicly readable.
 REVOKE ALL ON pg_subscription FROM public;
-GRANT SELECT (oid, subdbid, subname, subowner, subenabled, subbinary,
-              substream, subtwophasestate, subdisableonerr, subskiplsn, subslotname,
+GRANT SELECT (oid, subdbid, subskiplsn, subname, subowner, subenabled,
+              subbinary, substream, subtwophasestate, subdisableonerr, subslotname,
               subsynccommit, subpublications)
     ON pg_subscription TO public;
 

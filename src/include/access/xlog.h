@@ -50,6 +50,7 @@ extern bool *wal_consistency_checking;
 extern char *wal_consistency_checking_string;
 extern bool log_checkpoints;
 extern bool track_wal_io_timing;
+extern int	wal_decode_buffer_size;
 
 extern int	CheckPointSegments;
 
@@ -276,14 +277,13 @@ extern void XLogShutdownWalRcv(void);
 typedef enum SessionBackupState
 {
 	SESSION_BACKUP_NONE,
-	SESSION_BACKUP_EXCLUSIVE,
-	SESSION_BACKUP_NON_EXCLUSIVE
+	SESSION_BACKUP_RUNNING,
 } SessionBackupState;
 
-extern XLogRecPtr do_pg_start_backup(const char *backupidstr, bool fast,
+extern XLogRecPtr do_pg_backup_start(const char *backupidstr, bool fast,
 									 TimeLineID *starttli_p, StringInfo labelfile,
 									 List **tablespaces, StringInfo tblspcmapfile);
-extern XLogRecPtr do_pg_stop_backup(char *labelfile, bool waitforarchive,
+extern XLogRecPtr do_pg_backup_stop(char *labelfile, bool waitforarchive,
 									TimeLineID *stoptli_p);
 extern void do_pg_abort_backup(int code, Datum arg);
 extern void register_persistent_abort_backup_handler(void);
